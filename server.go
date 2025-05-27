@@ -104,6 +104,7 @@ func (s *Server) setDefaultEvents(welcome string) {
 	s.pongEvt = pe
 }
 
+// Start starts a server, and returns an error if it has ever been started before
 func (s *Server) Start() error {
 	if s.ctx != nil {
 		return errors.New("cannot start already started server")
@@ -114,6 +115,7 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// Stop stops a server if it has started, and returns an error if it is already stopped
 func (s *Server) Stop() error {
 	if s.ctx == nil {
 		return nil
@@ -128,10 +130,12 @@ func (s *Server) Stop() error {
 	}
 }
 
+// Connected returns how many clients are currently connected to the server
 func (s *Server) Connected() int {
 	return len(s.clients)
 }
 
+// StopIfEmpty stops the server if it is empty, returning true.
 func (s *Server) StopIfEmpty() bool {
 	if len(s.clients) == 0 {
 		s.Stop()
@@ -143,11 +147,12 @@ func (s *Server) StopIfEmpty() bool {
 func (s *Server) WSHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		upgrader := &websocket.Upgrader{
-			Subprotocols: []string{"lrcprotov1"},
+			Subprotocols: []string{"lrc.v1"},
 			CheckOrigin: func(r *http.Request) bool {
 				return true
 			},
 		}
+		// initialize
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Println("Upgrade failed:", err)
@@ -170,6 +175,7 @@ func (s *Server) WSHandler() http.HandlerFunc {
 		s.clients[client] = true
 		s.clientsMu.Unlock()
 
+		// lifetime
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); s.wsWriter(client) }()
@@ -177,21 +183,24 @@ func (s *Server) WSHandler() http.HandlerFunc {
 		s.logDebug("new ws connection!")
 		wg.Wait()
 
+		// clean up
 		s.clientsMu.Lock()
 		delete(s.clients, client)
 		close(client.dataChan)
 		s.clientsMu.Unlock()
+
 		s.idmapsMu.Lock()
-		for _, id := range client.myIDs {
+		for _, id := range client.myIDs { // remove myself from the idToClient map
 			delete(s.idToClient, id)
 		}
-		for mutedClient, _ := range client.muteMap {
+		for mutedClient := range client.muteMap { // remove myself from everyone that I muted's backreference map
 			delete(mutedClient.mutedBy, client)
 		}
-		for mutingClient, _ := range client.mutedBy {
+		for mutingClient := range client.mutedBy { // remove myself from everyone who muted me
 			delete(mutingClient.muteMap, client)
 		}
 		s.idmapsMu.Unlock()
+
 		conn.Close()
 		s.logDebug("closed ws connection")
 	}
@@ -293,27 +302,12 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	client.myIDs = append(client.myIDs, newID)
 	newpost := ""
 	client.post = &newpost
-	msg.Init.Id = newID
-	nick := client.nick
-	if nick != nil {
-		msg.Init.Nick = *nick
-	} else {
-		msg.Init.Nick = "wanderer"
-	}
-	externID := client.externID
-	if externID != nil {
-		msg.Init.ExternalID = *externID
-	} else {
-		msg.Init.ExternalID = ""
-	}
-	color := client.color
-	if color != nil {
-		msg.Init.Color = *color
-	} else {
-		msg.Init.Color = 0xD90368
-	}
-	msg.Init.Echoed = false
-
+	msg.Init.Id = &newID
+	msg.Init.Nick = client.nick
+	msg.Init.ExternalID = client.externID
+	msg.Init.Color = client.color
+	echoed := false
+	msg.Init.Echoed = &echoed
 	if s.initChan != nil {
 		select {
 		case s.initChan <- *msg:
@@ -329,7 +323,8 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
 	stdEvent := &lrcpb.Event{Msg: msg}
 	stdData, _ := proto.Marshal(stdEvent)
-	msg.Init.Echoed = true
+	echoed := true
+	msg.Init.Echoed = &echoed
 	echoEvent := &lrcpb.Event{Msg: msg}
 	echoData, _ := proto.Marshal(echoEvent)
 	muteEvent := &lrcpb.Event{Msg: &lrcpb.Event_Mute{Mute: &lrcpb.Mute{Id: msg.Init.GetId()}}}
@@ -363,7 +358,7 @@ func (s *Server) handlePub(msg *lrcpb.Event_Pub, client *client) {
 	s.idmapsMu.Lock()
 	s.clientToID[client] = nil
 	s.idmapsMu.Unlock()
-	msg.Pub.Id = *curID
+	msg.Pub.Id = curID
 	event := &lrcpb.Event{Msg: msg}
 	if s.pubChan != nil {
 		select {
@@ -383,12 +378,12 @@ func (s *Server) handleInsert(msg *lrcpb.Event_Insert, client *client) {
 	if curID == nil {
 		return
 	}
-	newpost, err := insertAtUTF16Index(*client.post, msg.Insert.GetByteIndex(), msg.Insert.GetBody())
+	newpost, err := insertAtUTF16Index(*client.post, msg.Insert.GetUtf16Index(), msg.Insert.GetBody())
 	if err != nil {
 		return
 	}
 	client.post = &newpost
-	msg.Insert.Id = *curID
+	msg.Insert.Id = curID
 	event := &lrcpb.Event{Msg: msg}
 	s.broadcast(event, client)
 }
@@ -421,12 +416,12 @@ func (s *Server) handleDelete(msg *lrcpb.Event_Delete, client *client) {
 	if curID == nil {
 		return
 	}
-	newPost, err := deleteBtwnUTF16Indices(*client.post, msg.Delete.GetByteStart(), msg.Delete.GetByteEnd())
+	newPost, err := deleteBtwnUTF16Indices(*client.post, msg.Delete.GetUtf16Start(), msg.Delete.GetUtf16End())
 	if err != nil {
 		return
 	}
 	client.post = &newPost
-	msg.Delete.Id = *curID
+	msg.Delete.Id = curID
 	event := &lrcpb.Event{Msg: msg}
 	s.broadcast(event, client)
 }
@@ -544,51 +539,6 @@ func (s *Server) handleGet(msg *lrcpb.Event_Get, client *client) {
 		client.dataChan <- data
 	}
 }
-
-// func (s *Server) broadcastAll(evt []byte) {
-// 	s.clientsMu.Lock()
-// 	defer s.clientsMu.Unlock()
-// 	for client := range s.clients {
-// 		select {
-// 		case client.evtChan <- evt:
-// 			s.logDebug(fmt.Sprintf("b %x", evt))
-// 		default:
-// 			s.log("kicked client")
-// 			if client.tcpconn != nil {
-// 				(*client.tcpconn).Close()
-// 			}
-// 			if client.wsconn != nil {
-// 				(*client.wsconn).Close()
-// 			}
-// 			delete(s.clients, client)
-// 		}
-// 	}
-// }
-
-// func (s *Server) broadcastInit(evt []byte, c *client, id uint32) {
-// 	bevt, eevt := events.GenServerEvent(evt, id)
-// 	s.clientsMu.Lock()
-// 	defer s.clientsMu.Unlock()
-// 	for client := range s.clients {
-// 		evtToSend := bevt
-// 		if client == c {
-// 			evtToSend = eevt
-// 		}
-// 		select {
-// 		case client.evtChan <- evtToSend:
-// 			s.logDebug(fmt.Sprintf("b %x", bevt))
-// 		default:
-// 			s.log("kicked client")
-// 			if client.tcpconn != nil {
-// 				(*client.tcpconn).Close()
-// 			}
-// 			if client.wsconn != nil {
-// 				(*client.wsconn).Close()
-// 			}
-// 			delete(s.clients, client)
-// 		}
-// 	}
-// }
 
 // logDebug debugs unless in production
 func (server *Server) logDebug(s string) {
