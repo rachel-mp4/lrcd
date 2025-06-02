@@ -210,12 +210,15 @@ func (s *Server) listenToWS(client *client) {
 	for {
 		select {
 		case <-client.ctx.Done():
+			s.logDebug("exiting listenToWS: client done")
 			return
 		case <-s.ctx.Done():
+			s.logDebug("exiting listenToWS: server done")
 			return
 		default:
 			_, data, err := client.conn.ReadMessage()
 			if err != nil {
+				s.logDebug("canceling client: read error")
 				client.cancel()
 				return
 			}
@@ -235,11 +238,14 @@ func (s *Server) wsWriter(client *client) {
 	for {
 		select {
 		case <-client.ctx.Done():
+			s.logDebug("exiting wsWriter: client done")
 			return
 		case <-s.ctx.Done():
+			s.logDebug("exiting wsWriter: server done")
 			return
 		case data, ok := <-client.dataChan:
 			if !ok {
+				s.logDebug("canceling client: dataChan closed")
 				client.cancel()
 				return
 			}
