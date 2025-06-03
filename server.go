@@ -6,6 +6,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/rachel-mp4/lrcproto/gen/go"
 	"google.golang.org/protobuf/proto"
+	"unicode/utf16"
 	"log"
 	"net/http"
 	"sync"
@@ -396,25 +397,19 @@ func (s *Server) handleInsert(msg *lrcpb.Event_Insert, client *client) {
 
 func insertAtUTF16Index(base string, index uint32, insert string) (string, error) {
 	runes := []rune(base)
-
-	unitCount := 0
-	var splitAt int
-	for i, r := range runes {
-		units := 1
-		if r > 0xFFFF {
-			units = 2
-		}
-		if uint32(unitCount+units) > index {
-			splitAt = i
-			break
-		}
-		unitCount += units
-		splitAt = i + 1
-	}
-	if index > uint32(unitCount) {
+	baseUTF16Units := utf16.Encode(runes)
+	if uint32(len(baseUTF16Units)) < index {
 		return "", errors.New("index out of range")
 	}
-	return string(runes[:splitAt]) + insert + string(runes[splitAt:]), nil
+
+	insertRunes := []rune(insert)
+	insertUTF16Units := utf16.Encode(insertRunes)
+	result := make([]uint16, 0, len(baseUTF16Units) + len(insertUTF16Units))
+	result = append(result, baseUTF16Units[:index]...)
+	result = append(result, insertUTF16Units...)
+	result = append(result, baseUTF16Units[index:]...)
+	resultRunes := utf16.Decode(result)
+	return string(resultRunes), nil
 }
 
 func (s *Server) handleDelete(msg *lrcpb.Event_Delete, client *client) {
@@ -437,27 +432,15 @@ func deleteBtwnUTF16Indices(base string, start uint32, end uint32) (string, erro
 		return "", errors.New("end must come after start")
 	}
 	runes := []rune(base)
-	unitCount := 0
-	var startAt, endAt *int
-	for i, r := range runes {
-		units := 1
-		if r > 0xFFFF {
-			units = 2
-		}
-		if startAt == nil && uint32(unitCount+units) > start {
-			startAt = &i
-		}
-		if uint32(unitCount) > end {
-			endAt = &i
-			break
-		}
-		unitCount += units
-	}
-	if end > uint32(unitCount) {
+	baseUTF16Units := utf16.Encode(runes)
+	if uint32(len(baseUTF16Units)) < end {
 		return "", errors.New("index out of range")
 	}
-	return string(runes[:*startAt]) + string(runes[*endAt:]), nil
-
+	result := make([]uint16, 0, uint32(len(baseUTF16Units)) + start - end)
+	result = append(result, baseUTF16Units[:start]...)
+	result = append(result, baseUTF16Units[end:]...)
+	resultRunes := utf16.Decode(result)
+	return string(resultRunes), nil
 }
 
 func (s *Server) broadcast(event *lrcpb.Event, client *client) {
