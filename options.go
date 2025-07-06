@@ -9,11 +9,12 @@ import (
 )
 
 type options struct {
-	welcome  *string
-	writer   *io.Writer
-	verbose  bool
-	pubChan  chan PubEvent
-	initChan chan lrcpb.Event_Init
+	welcome   *string
+	writer    *io.Writer
+	verbose   bool
+	pubChan   chan PubEvent
+	initChan  chan lrcpb.Event_Init
+	initialID *uint32
 }
 
 type Option func(option *options) error
@@ -24,6 +25,13 @@ func WithWelcome(welcome string) Option {
 			return errors.New("welcome must be at most 50 runes")
 		}
 		options.welcome = &welcome
+		return nil
+	}
+}
+
+func WithInitialID(id uint32) Option {
+	return func(options *options) error {
+		options.initialID = &id
 		return nil
 	}
 }

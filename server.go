@@ -6,10 +6,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/rachel-mp4/lrcproto/gen/go"
 	"google.golang.org/protobuf/proto"
-	"unicode/utf16"
 	"log"
 	"net/http"
 	"sync"
+	"unicode/utf16"
 )
 
 type Server struct {
@@ -84,13 +84,15 @@ func NewServer(opts ...Option) (*Server, error) {
 	if options.pubChan != nil {
 		s.pubChan = options.pubChan
 	}
+	if options.initialID != nil {
+		s.lastID = *options.initialID
+	}
 
 	s.clients = make(map[*client]bool)
 	s.clientsMu = sync.Mutex{}
 	s.idmapsMu = sync.Mutex{}
 	s.clientToID = make(map[*client]*uint32)
 	s.idToClient = make(map[uint32]*client)
-	s.lastID = 0
 	s.eventBus = make(chan clientEvent, 100)
 	return &s, nil
 }
@@ -117,17 +119,17 @@ func (s *Server) Start() error {
 }
 
 // Stop stops a server if it has started, and returns an error if it is already stopped
-func (s *Server) Stop() error {
+func (s *Server) Stop() (uint32, error) {
 	if s.ctx == nil {
-		return nil
+		return s.lastID, nil
 	}
 	select {
 	case <-s.ctx.Done():
-		return errors.New("cannot stop already stopped server")
+		return s.lastID, errors.New("cannot stop already stopped server")
 	default:
 		s.cancel()
 		s.logDebug("Goodbye world :c")
-		return nil
+		return s.lastID, nil
 	}
 }
 
@@ -404,7 +406,7 @@ func insertAtUTF16Index(base string, index uint32, insert string) (string, error
 
 	insertRunes := []rune(insert)
 	insertUTF16Units := utf16.Encode(insertRunes)
-	result := make([]uint16, 0, len(baseUTF16Units) + len(insertUTF16Units))
+	result := make([]uint16, 0, len(baseUTF16Units)+len(insertUTF16Units))
 	result = append(result, baseUTF16Units[:index]...)
 	result = append(result, insertUTF16Units...)
 	result = append(result, baseUTF16Units[index:]...)
@@ -436,7 +438,7 @@ func deleteBtwnUTF16Indices(base string, start uint32, end uint32) (string, erro
 	if uint32(len(baseUTF16Units)) < end {
 		return "", errors.New("index out of range")
 	}
-	result := make([]uint16, 0, uint32(len(baseUTF16Units)) + start - end)
+	result := make([]uint16, 0, uint32(len(baseUTF16Units))+start-end)
 	result = append(result, baseUTF16Units[:start]...)
 	result = append(result, baseUTF16Units[end:]...)
 	resultRunes := utf16.Decode(result)
