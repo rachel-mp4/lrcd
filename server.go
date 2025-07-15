@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 	"unicode/utf16"
 )
 
@@ -128,6 +129,12 @@ func (s *Server) Stop() (uint32, error) {
 		return s.lastID, errors.New("cannot stop already stopped server")
 	default:
 		s.cancel()
+		if s.initChan != nil {
+			close(s.initChan)
+		}
+		if s.pubChan != nil {
+			close(s.pubChan)
+		}
 		s.logDebug("Goodbye world :c")
 		return s.lastID, nil
 	}
@@ -238,8 +245,11 @@ func (s *Server) listenToWS(client *client) {
 }
 
 func (s *Server) wsWriter(client *client) {
+	ticker := time.NewTicker(15 * time.Second)
 	for {
 		select {
+		case <-ticker.C:
+			client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
 		case <-client.ctx.Done():
 			s.logDebug("exiting wsWriter: client done")
 			return
