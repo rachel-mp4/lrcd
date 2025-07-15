@@ -249,7 +249,11 @@ func (s *Server) wsWriter(client *client) {
 	for {
 		select {
 		case <-ticker.C:
-			client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			err := client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			if err != nil {
+				client.cancel()
+				return
+			}
 		case <-client.ctx.Done():
 			s.logDebug("exiting wsWriter: client done")
 			return
