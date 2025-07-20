@@ -9,6 +9,8 @@ import (
 )
 
 type options struct {
+	uri       string
+	secret    string
 	welcome   *string
 	writer    *io.Writer
 	verbose   bool
@@ -63,6 +65,14 @@ func WithPubChannel(pubChan chan PubEvent) Option {
 			return errors.New("must provide a channel")
 		}
 		options.pubChan = pubChan
+		return nil
+	}
+}
+
+func WithServerURIAndSecret(uri string, secret string) Option {
+	return func(options *options) error {
+		options.secret = secret
+		options.uri = uri
 		return nil
 	}
 }

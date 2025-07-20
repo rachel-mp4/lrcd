@@ -14,6 +14,8 @@ import (
 )
 
 type Server struct {
+	secret      string
+	uri         string
 	eventBus    chan clientEvent
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -88,6 +90,8 @@ func NewServer(opts ...Option) (*Server, error) {
 	if options.initialID != nil {
 		s.lastID = *options.initialID
 	}
+	s.uri = options.uri
+	s.secret = options.secret
 
 	s.clients = make(map[*client]bool)
 	s.clientsMu = sync.Mutex{}
@@ -331,6 +335,7 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	msg.Init.Color = client.color
 	echoed := false
 	msg.Init.Echoed = &echoed
+	msg.Init.Nonce = nil
 	if s.initChan != nil {
 		select {
 		case s.initChan <- *msg:
@@ -348,6 +353,7 @@ func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
 	stdData, _ := proto.Marshal(stdEvent)
 	echoed := true
 	msg.Init.Echoed = &echoed
+	msg.Init.Nonce = GenerateNonce(*msg.Init.Id, s.uri, s.secret)
 	echoEvent := &lrcpb.Event{Msg: msg}
 	echoData, _ := proto.Marshal(echoEvent)
 	muteEvent := &lrcpb.Event{Msg: &lrcpb.Event_Mute{Mute: &lrcpb.Mute{Id: msg.Init.GetId()}}}
