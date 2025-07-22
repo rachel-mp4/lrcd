@@ -3,7 +3,6 @@ package lrcd
 import (
 	"errors"
 	"io"
-	"unicode/utf8"
 
 	lrcpb "github.com/rachel-mp4/lrcproto/gen/go"
 )
@@ -23,9 +22,6 @@ type Option func(option *options) error
 
 func WithWelcome(welcome string) Option {
 	return func(options *options) error {
-		if utf8.RuneCountInString(welcome) > 50 {
-			return errors.New("welcome must be at most 50 runes")
-		}
 		options.welcome = &welcome
 		return nil
 	}
