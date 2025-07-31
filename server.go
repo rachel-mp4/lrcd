@@ -7,6 +7,7 @@ import (
 	"github.com/rachel-mp4/lrcproto/gen/go"
 	"google.golang.org/protobuf/proto"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -173,6 +174,14 @@ func (s *Server) WSHandler() http.HandlerFunc {
 			return
 		}
 		defer conn.Close()
+
+		if netConn := conn.UnderlyingConn(); netConn != nil {
+			if tcpConn, ok := netConn.(*net.TCPConn); ok {
+				if err := tcpConn.SetNoDelay(true); err != nil {
+					log.Println("failed to denagle")
+				}
+			}
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		client := &client{
