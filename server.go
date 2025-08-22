@@ -495,6 +495,7 @@ func (s *Server) broadcast(event *lrcpb.Event, client *client) {
 func (s *Server) handleMute(msg *lrcpb.Event_Mute, client *client) {
 	toMute := msg.Mute.GetId()
 	s.idmapsMu.Lock()
+	defer s.idmapsMu.Unlock()
 	clientToMute, ok := s.idToClient[toMute]
 	if !ok {
 		return
@@ -504,13 +505,13 @@ func (s *Server) handleMute(msg *lrcpb.Event_Mute, client *client) {
 	}
 	clientToMute.mutedBy[client] = true
 	client.muteMap[clientToMute] = true
-	s.idmapsMu.Unlock()
 
 }
 
 func (s *Server) handleUnmute(msg *lrcpb.Event_Unmute, client *client) {
 	toMute := msg.Unmute.GetId()
 	s.idmapsMu.Lock()
+	defer s.idmapsMu.Unlock()
 	clientToMute, ok := s.idToClient[toMute]
 	if !ok {
 		return
@@ -520,8 +521,6 @@ func (s *Server) handleUnmute(msg *lrcpb.Event_Unmute, client *client) {
 	}
 	delete(clientToMute.mutedBy, client)
 	delete(client.muteMap, clientToMute)
-	s.idmapsMu.Unlock()
-
 }
 
 func (s *Server) handleSet(msg *lrcpb.Event_Set, client *client) {
