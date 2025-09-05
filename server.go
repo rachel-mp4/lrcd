@@ -252,7 +252,7 @@ func (s *Server) listenToWS(client *client) {
 				client.cancel()
 				return
 			}
-			s.eventBus <- clientEvent{client, &event}
+			s.eventBus <- clientEvent{client: client, event: &event}
 		}
 	}
 }
@@ -319,7 +319,10 @@ func (s *Server) broadcaster() {
 				s.handleSet(msg, client)
 			case *lrcpb.Event_Get:
 				s.handleGet(msg, client)
+			case *lrcpb.Event_Editbatch:
+				s.handleEditBatch(msg, client)
 			}
+
 		}
 	}
 }
@@ -473,8 +476,46 @@ func deleteBtwnUTF16Indices(base string, start uint32, end uint32) (string, erro
 	resultRunes := utf16.Decode(result)
 	return string(resultRunes), nil
 }
-
 func (s *Server) broadcast(event *lrcpb.Event, client *client) {
+	data, _ := proto.Marshal(event)
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	for c := range s.clients {
+		if client.mutedBy[c] {
+			continue
+		}
+		select {
+		case c.dataChan <- data:
+			s.logDebug("b")
+		default:
+			s.log("kicked client")
+			client.cancel()
+		}
+	}
+}
+
+func (s *Server) handleEditBatch(msg *lrcpb.Event_Editbatch, client *client) {
+	curID := s.clientToID[client]
+	if curID == nil {
+		return
+	}
+	for _, edit := range msg.Editbatch.Edits {
+		switch edit := edit.Edit.(type) {
+		case *lrcpb.Edit_Insert:
+			inserted, err := insertAtUTF16Index(*client.post, edit.Insert.GetUtf16Index(), edit.Insert.GetBody())
+			if err != nil {
+				return
+			}
+			client.post = &inserted
+		case *lrcpb.Edit_Delete:
+			deleted, err := deleteBtwnUTF16Indices(*client.post, edit.Delete.GetUtf16Start(), edit.Delete.GetUtf16End())
+			if err != nil {
+				return
+			}
+			client.post = &deleted
+		}
+	}
+	event := &lrcpb.Event{Msg: msg, Id: curID}
 	data, _ := proto.Marshal(event)
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
