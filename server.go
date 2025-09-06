@@ -499,22 +499,23 @@ func (s *Server) handleEditBatch(msg *lrcpb.Event_Editbatch, client *client) {
 	if curID == nil {
 		return
 	}
+	plorp := *client.post
+	var err error
 	for _, edit := range msg.Editbatch.Edits {
 		switch edit := edit.Edit.(type) {
 		case *lrcpb.Edit_Insert:
-			inserted, err := insertAtUTF16Index(*client.post, edit.Insert.GetUtf16Index(), edit.Insert.GetBody())
+			plorp, err = insertAtUTF16Index(plorp, edit.Insert.GetUtf16Index(), edit.Insert.GetBody())
 			if err != nil {
 				return
 			}
-			client.post = &inserted
 		case *lrcpb.Edit_Delete:
-			deleted, err := deleteBtwnUTF16Indices(*client.post, edit.Delete.GetUtf16Start(), edit.Delete.GetUtf16End())
+			plorp, err = deleteBtwnUTF16Indices(plorp, edit.Delete.GetUtf16Start(), edit.Delete.GetUtf16End())
 			if err != nil {
 				return
 			}
-			client.post = &deleted
 		}
 	}
+	client.post = &plorp
 	event := &lrcpb.Event{Msg: msg, Id: curID}
 	data, _ := proto.Marshal(event)
 	s.clientsMu.Lock()
