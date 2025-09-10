@@ -211,8 +211,10 @@ func (s *Server) WSHandler() http.HandlerFunc {
 		delete(s.clients, client)
 		close(client.dataChan)
 		s.clientsMu.Unlock()
+		s.handlePub(client)
 
 		s.idmapsMu.Lock()
+		delete(s.clientToID, client)
 		for _, id := range client.myIDs { // remove myself from the idToClient map
 			delete(s.idToClient, id)
 		}
@@ -306,7 +308,7 @@ func (s *Server) broadcaster() {
 			case *lrcpb.Event_Init:
 				s.handleInit(msg, client)
 			case *lrcpb.Event_Pub:
-				s.handlePub(msg, client)
+				s.handlePub(client)
 			case *lrcpb.Event_Insert:
 				s.handleInsert(msg, client)
 			case *lrcpb.Event_Delete:
@@ -328,13 +330,14 @@ func (s *Server) broadcaster() {
 }
 
 func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
+	s.idmapsMu.Lock()
 	curID := s.clientToID[client]
 	if curID != nil {
+		s.idmapsMu.Unlock()
 		return
 	}
 	newID := s.lastID + 1
 	s.lastID = newID
-	s.idmapsMu.Lock()
 	s.clientToID[client] = &newID
 	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
@@ -391,16 +394,16 @@ func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
 	}
 }
 
-func (s *Server) handlePub(msg *lrcpb.Event_Pub, client *client) {
+func (s *Server) handlePub(client *client) {
+	s.idmapsMu.Lock()
 	curID := s.clientToID[client]
 	if curID == nil {
+		s.idmapsMu.Unlock()
 		return
 	}
-	s.idmapsMu.Lock()
 	s.clientToID[client] = nil
 	s.idmapsMu.Unlock()
-	msg.Pub.Id = curID
-	event := &lrcpb.Event{Msg: msg}
+	event := &lrcpb.Event{Msg: &lrcpb.Event_Pub{Pub: &lrcpb.Pub{Id: curID}}}
 	if s.pubChan != nil {
 		select {
 		case s.pubChan <- PubEvent{ID: *curID, Body: *client.post}:
@@ -415,7 +418,9 @@ func (s *Server) handlePub(msg *lrcpb.Event_Pub, client *client) {
 }
 
 func (s *Server) handleInsert(msg *lrcpb.Event_Insert, client *client) {
+	s.idmapsMu.Lock()
 	curID := s.clientToID[client]
+	s.idmapsMu.Unlock()
 	if curID == nil {
 		return
 	}
@@ -447,7 +452,9 @@ func insertAtUTF16Index(base string, index uint32, insert string) (string, error
 }
 
 func (s *Server) handleDelete(msg *lrcpb.Event_Delete, client *client) {
+	s.idmapsMu.Lock()
 	curID := s.clientToID[client]
+	s.idmapsMu.Unlock()
 	if curID == nil {
 		return
 	}
@@ -495,7 +502,9 @@ func (s *Server) broadcast(event *lrcpb.Event, client *client) {
 }
 
 func (s *Server) handleEditBatch(msg *lrcpb.Event_Editbatch, client *client) {
+	s.idmapsMu.Lock()
 	curID := s.clientToID[client]
+	s.idmapsMu.Unlock()
 	if curID == nil {
 		return
 	}
