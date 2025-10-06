@@ -8,14 +8,15 @@ import (
 )
 
 type options struct {
-	uri       string
-	secret    string
-	welcome   *string
-	writer    *io.Writer
-	verbose   bool
-	pubChan   chan PubEvent
-	initChan  chan lrcpb.Event_Init
-	initialID *uint32
+	uri           string
+	secret        string
+	welcome       *string
+	writer        *io.Writer
+	verbose       bool
+	pubChan       chan PubEvent
+	initChan      chan lrcpb.Event_Init
+	mediainitChan chan lrcpb.Event_Mediainit
+	initialID     *uint32
 }
 
 type Option func(option *options) error
@@ -51,6 +52,16 @@ func WithInitChannel(initChan chan lrcpb.Event_Init) Option {
 			return errors.New("must provide a channel")
 		}
 		options.initChan = initChan
+		return nil
+	}
+}
+
+func WithMediainitChannel(mediainitChan chan lrcpb.Event_Mediainit) Option {
+	return func(options *options) error {
+		if mediainitChan == nil {
+			return errors.New("must provide a channel")
+		}
+		options.mediainitChan = mediainitChan
 		return nil
 	}
 }

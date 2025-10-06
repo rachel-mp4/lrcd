@@ -3,6 +3,7 @@ package lrcd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/gorilla/websocket"
 	"github.com/rachel-mp4/lrcproto/gen/go"
 	"google.golang.org/protobuf/proto"
@@ -15,23 +16,23 @@ import (
 )
 
 type Server struct {
-	secret      string
-	uri         string
-	eventBus    chan clientEvent
-	ctx         context.Context
-	cancel      context.CancelFunc
-	clients     map[*client]bool
-	clientsMu   sync.Mutex
-	idmapsMu    sync.Mutex
-	clientToID  map[*client]*uint32
-	idToClient  map[uint32]*client
-	lastID      uint32
-	logger      *log.Logger
-	debugLogger *log.Logger
-	welcomeEvt  []byte
-	pongEvt     []byte
-	initChan    chan lrcpb.Event_Init
-	pubChan     chan PubEvent
+	secret        string
+	uri           string
+	eventBus      chan clientEvent
+	ctx           context.Context
+	cancel        context.CancelFunc
+	clients       map[*client]bool
+	clientsMu     sync.Mutex
+	idmapsMu      sync.Mutex
+	idToClient    map[uint32]*client
+	lastID        uint32
+	logger        *log.Logger
+	debugLogger   *log.Logger
+	welcomeEvt    []byte
+	pongEvt       []byte
+	initChan      chan lrcpb.Event_Init
+	mediainitChan chan lrcpb.Event_Mediainit
+	pubChan       chan PubEvent
 }
 
 type PubEvent struct {
@@ -47,6 +48,8 @@ type client struct {
 	muteMap  map[*client]bool
 	mutedBy  map[*client]bool
 	myIDs    []uint32
+	textID   *uint32
+	mediaID  *uint32
 	post     *string
 	nick     *string
 	externID *string
@@ -85,6 +88,9 @@ func NewServer(opts ...Option) (*Server, error) {
 	if options.initChan != nil {
 		s.initChan = options.initChan
 	}
+	if options.mediainitChan != nil {
+		s.mediainitChan = options.mediainitChan
+	}
 	if options.pubChan != nil {
 		s.pubChan = options.pubChan
 	}
@@ -97,7 +103,6 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.clients = make(map[*client]bool)
 	s.clientsMu = sync.Mutex{}
 	s.idmapsMu = sync.Mutex{}
-	s.clientToID = make(map[*client]*uint32)
 	s.idToClient = make(map[uint32]*client)
 	s.eventBus = make(chan clientEvent, 100)
 	return &s, nil
@@ -214,7 +219,6 @@ func (s *Server) WSHandler() http.HandlerFunc {
 		s.handlePub(client)
 
 		s.idmapsMu.Lock()
-		delete(s.clientToID, client)
 		for _, id := range client.myIDs { // remove myself from the idToClient map
 			delete(s.idToClient, id)
 		}
@@ -307,8 +311,12 @@ func (s *Server) broadcaster() {
 				continue
 			case *lrcpb.Event_Init:
 				s.handleInit(msg, client)
+			case *lrcpb.Event_Mediainit:
+				s.handleMediainit(msg, client)
 			case *lrcpb.Event_Pub:
 				s.handlePub(client)
+			case *lrcpb.Event_Mediapub:
+				s.handleMediapub(msg, client)
 			case *lrcpb.Event_Insert:
 				s.handleInsert(msg, client)
 			case *lrcpb.Event_Delete:
@@ -330,17 +338,16 @@ func (s *Server) broadcaster() {
 }
 
 func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
-	s.idmapsMu.Lock()
-	curID := s.clientToID[client]
+	curID := client.textID
 	if curID != nil {
-		s.idmapsMu.Unlock()
 		return
 	}
+	s.idmapsMu.Lock()
 	newID := s.lastID + 1
 	s.lastID = newID
-	s.clientToID[client] = &newID
 	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
+	client.textID = &newID
 	client.myIDs = append(client.myIDs, newID)
 	newpost := ""
 	client.post = &newpost
@@ -393,16 +400,74 @@ func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
 		}
 	}
 }
-
-func (s *Server) handlePub(client *client) {
-	s.idmapsMu.Lock()
-	curID := s.clientToID[client]
-	if curID == nil {
-		s.idmapsMu.Unlock()
+func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
+	curId := client.mediaID
+	if curId != nil {
 		return
 	}
-	s.clientToID[client] = nil
+	s.idmapsMu.Lock()
+	newID := s.lastID + 1
+	s.lastID = newID
+	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
+	client.mediaID = &newID
+	client.myIDs = append(client.myIDs, newID)
+	msg.Mediainit.Id = &newID
+	msg.Mediainit.Nick = client.nick
+	msg.Mediainit.ExternalID = client.externID
+	msg.Mediainit.Color = client.color
+	echoed := false
+	msg.Mediainit.Echoed = &echoed
+	msg.Mediainit.Nonce = nil
+	if s.mediainitChan != nil {
+		select {
+		case s.mediainitChan <- *msg:
+		default:
+			s.log("initchan blocked, closing channel")
+			close(s.mediainitChan)
+			s.mediainitChan = nil
+		}
+	}
+	s.broadcastMediainit(msg, client)
+}
+
+func (s *Server) broadcastMediainit(msg *lrcpb.Event_Mediainit, client *client) {
+	stdEvent := &lrcpb.Event{Msg: msg}
+	stdData, _ := proto.Marshal(stdEvent)
+	echoed := true
+	msg.Mediainit.Echoed = &echoed
+	msg.Mediainit.Nonce = GenerateNonce(*msg.Mediainit.Id, s.uri, s.secret)
+	echoEvent := &lrcpb.Event{Msg: msg}
+	echoData, _ := proto.Marshal(echoEvent)
+	muteEvent := &lrcpb.Event{Msg: &lrcpb.Event_Mute{Mute: &lrcpb.Mute{Id: msg.Mediainit.GetId()}}}
+	muteData, _ := proto.Marshal(muteEvent)
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	for c := range s.clients {
+		var dts []byte
+		if c == client {
+			dts = echoData
+		} else if client.mutedBy[c] {
+			dts = muteData
+		} else {
+			dts = stdData
+		}
+		select {
+		case c.dataChan <- dts:
+			s.logDebug("b mediainit")
+		default:
+			s.log("kicked client")
+			client.cancel()
+		}
+	}
+}
+
+func (s *Server) handlePub(client *client) {
+	curID := client.textID
+	if curID == nil {
+		return
+	}
+	client.textID = nil
 	event := &lrcpb.Event{Msg: &lrcpb.Event_Pub{Pub: &lrcpb.Pub{Id: curID}}}
 	if s.pubChan != nil {
 		select {
@@ -417,10 +482,35 @@ func (s *Server) handlePub(client *client) {
 	s.broadcast(event, client)
 }
 
+func (s *Server) handleMediapub(msg *lrcpb.Event_Mediapub, client *client) {
+	curID := client.mediaID
+	if curID == nil {
+		return
+	}
+	client.mediaID = nil
+	msg.Mediapub.Id = curID
+	body := "external media."
+	if msg.Mediapub.Alt != nil {
+		body += fmt.Sprintf(" alt=%s.", *msg.Mediapub.Alt)
+	}
+	if msg.Mediapub.ContentAddress != nil {
+		body += fmt.Sprintf(" cid=%s.", *msg.Mediapub.ContentAddress)
+	}
+	if s.pubChan != nil {
+		select {
+		case s.pubChan <- PubEvent{ID: *curID, Body: body}:
+		default:
+			s.log("pubchan blocked, closing channel")
+			close(s.pubChan)
+			s.pubChan = nil
+		}
+	}
+	event := &lrcpb.Event{Msg: msg}
+	s.broadcast(event, client)
+}
+
 func (s *Server) handleInsert(msg *lrcpb.Event_Insert, client *client) {
-	s.idmapsMu.Lock()
-	curID := s.clientToID[client]
-	s.idmapsMu.Unlock()
+	curID := client.textID
 	if curID == nil {
 		return
 	}
@@ -452,9 +542,7 @@ func insertAtUTF16Index(base string, index uint32, insert string) (string, error
 }
 
 func (s *Server) handleDelete(msg *lrcpb.Event_Delete, client *client) {
-	s.idmapsMu.Lock()
-	curID := s.clientToID[client]
-	s.idmapsMu.Unlock()
+	curID := client.textID
 	if curID == nil {
 		return
 	}
@@ -502,9 +590,7 @@ func (s *Server) broadcast(event *lrcpb.Event, client *client) {
 }
 
 func (s *Server) handleEditBatch(msg *lrcpb.Event_Editbatch, client *client) {
-	s.idmapsMu.Lock()
-	curID := s.clientToID[client]
-	s.idmapsMu.Unlock()
+	curID := client.textID
 	if curID == nil {
 		return
 	}
