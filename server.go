@@ -401,11 +401,13 @@ func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
 	}
 }
 func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
+	s.logDebug("want to handle media init")
 	curId := client.mediaID
 	if curId != nil {
 		return
 	}
 	s.idmapsMu.Lock()
+	s.logDebug("handling media init")
 	newID := s.lastID + 1
 	s.lastID = newID
 	s.idToClient[newID] = client
