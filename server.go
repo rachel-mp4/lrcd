@@ -16,23 +16,30 @@ import (
 )
 
 type Server struct {
-	secret        string
-	uri           string
-	eventBus      chan clientEvent
-	ctx           context.Context
-	cancel        context.CancelFunc
-	clients       map[*client]bool
-	clientsMu     sync.Mutex
-	idmapsMu      sync.Mutex
-	idToClient    map[uint32]*client
-	lastID        uint32
-	logger        *log.Logger
-	debugLogger   *log.Logger
-	welcomeEvt    []byte
-	pongEvt       []byte
-	initChan      chan lrcpb.Event_Init
-	mediainitChan chan lrcpb.Event_Mediainit
-	pubChan       chan PubEvent
+	secret      string
+	uri         string
+	eventBus    chan clientEvent
+	ctx         context.Context
+	cancel      context.CancelFunc
+	clients     map[*client]bool
+	clientsMu   sync.Mutex
+	idmapsMu    sync.Mutex
+	idToClient  map[uint32]*client
+	lastID      uint32
+	logger      *log.Logger
+	debugLogger *log.Logger
+	welcomeEvt  []byte
+	pongEvt     []byte
+	initChan    chan struct {
+		lrcpb.Event_Init
+		*string
+	}
+	mediainitChan chan struct {
+		lrcpb.Event_Mediainit
+		*string
+	}
+	resolver func(externalID string, ctx context.Context) *string
+	pubChan  chan PubEvent
 }
 
 type PubEvent struct {
@@ -53,6 +60,8 @@ type client struct {
 	post     *string
 	nick     *string
 	externID *string
+	resolvID *string
+	rcancel  context.CancelFunc
 	color    *uint32
 }
 
@@ -99,6 +108,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	}
 	s.uri = options.uri
 	s.secret = options.secret
+	s.resolver = options.resolver
 
 	s.clients = make(map[*client]bool)
 	s.clientsMu = sync.Mutex{}
@@ -360,7 +370,10 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	msg.Init.Nonce = nil
 	if s.initChan != nil {
 		select {
-		case s.initChan <- *msg:
+		case s.initChan <- struct {
+			lrcpb.Event_Init
+			*string
+		}{*msg, client.resolvID}:
 		default:
 			s.log("initchan blocked, closing channel")
 			close(s.initChan)
@@ -423,7 +436,10 @@ func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
 	msg.Mediainit.Nonce = nil
 	if s.mediainitChan != nil {
 		select {
-		case s.mediainitChan <- *msg:
+		case s.mediainitChan <- struct {
+			lrcpb.Event_Mediainit
+			*string
+		}{*msg, client.resolvID}:
 		default:
 			s.log("initchan blocked, closing channel")
 			close(s.mediainitChan)
@@ -674,6 +690,15 @@ func (s *Server) handleSet(msg *lrcpb.Event_Set, client *client) {
 	if externalId != nil {
 		externid := *externalId
 		client.externID = &externid
+		client.rcancel()
+		if s.resolver != nil {
+			go func() {
+				ctx, cancel := context.WithCancel(client.ctx)
+				client.rcancel = cancel
+				resolvid := s.resolver(externid, ctx)
+				client.resolvID = resolvid
+			}()
+		}
 	}
 	color := msg.Set.Color
 	if color != nil {

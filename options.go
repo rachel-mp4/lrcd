@@ -1,6 +1,7 @@
 package lrcd
 
 import (
+	"context"
 	"errors"
 	"io"
 
@@ -8,18 +9,35 @@ import (
 )
 
 type options struct {
-	uri           string
-	secret        string
-	welcome       *string
-	writer        *io.Writer
-	verbose       bool
-	pubChan       chan PubEvent
-	initChan      chan lrcpb.Event_Init
-	mediainitChan chan lrcpb.Event_Mediainit
-	initialID     *uint32
+	uri      string
+	secret   string
+	welcome  *string
+	writer   *io.Writer
+	verbose  bool
+	pubChan  chan PubEvent
+	initChan chan struct {
+		lrcpb.Event_Init
+		*string
+	}
+	mediainitChan chan struct {
+		lrcpb.Event_Mediainit
+		*string
+	}
+	initialID *uint32
+	resolver  func(externalID string, ctx context.Context) *string
 }
 
 type Option func(option *options) error
+
+func WithResolver(f func(externalID string, ctx context.Context) *string) Option {
+	return func(options *options) error {
+		if f == nil {
+			return errors.New("resolver must be non nil")
+		}
+		options.resolver = f
+		return nil
+	}
+}
 
 func WithWelcome(welcome string) Option {
 	return func(options *options) error {
@@ -46,7 +64,10 @@ func WithLogging(w io.Writer, verbose bool) Option {
 	}
 }
 
-func WithInitChannel(initChan chan lrcpb.Event_Init) Option {
+func WithInitChannel(initChan chan struct {
+	lrcpb.Event_Init
+	*string
+}) Option {
 	return func(options *options) error {
 		if initChan == nil {
 			return errors.New("must provide a channel")
@@ -56,7 +77,10 @@ func WithInitChannel(initChan chan lrcpb.Event_Init) Option {
 	}
 }
 
-func WithMediainitChannel(mediainitChan chan lrcpb.Event_Mediainit) Option {
+func WithMediainitChannel(mediainitChan chan struct {
+	lrcpb.Event_Mediainit
+	*string
+}) Option {
 	return func(options *options) error {
 		if mediainitChan == nil {
 			return errors.New("must provide a channel")
