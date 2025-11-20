@@ -364,10 +364,7 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	msg.Init.Nonce = nil
 	if s.initChan != nil {
 		select {
-		case s.initChan <- struct {
-			lrcpb.Event_Init
-			*string
-		}{*msg, client.resolvID}:
+		case s.initChan <- InitChanMsg{*msg, client.resolvID}:
 		default:
 			s.log("initchan blocked, closing channel")
 			close(s.initChan)
@@ -430,10 +427,7 @@ func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
 	msg.Mediainit.Nonce = nil
 	if s.mediainitChan != nil {
 		select {
-		case s.mediainitChan <- struct {
-			lrcpb.Event_Mediainit
-			*string
-		}{*msg, client.resolvID}:
+		case s.mediainitChan <- MediaInitChanMsg{*msg, client.resolvID}:
 		default:
 			s.log("initchan blocked, closing channel")
 			close(s.mediainitChan)

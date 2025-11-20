@@ -9,13 +9,13 @@ import (
 )
 
 type InitChanMsg struct {
-	lrcpb.Event_Init
-	*string
+	init       lrcpb.Event_Init
+	resolvedId *string
 }
 
 type MediaInitChanMsg struct {
-	lrcpb.Event_Mediainit
-	*string
+	mediainit  lrcpb.Event_Mediainit
+	resolvedId *string
 }
 
 type options struct {
