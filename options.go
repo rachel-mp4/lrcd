@@ -8,23 +8,27 @@ import (
 	lrcpb "github.com/rachel-mp4/lrcproto/gen/go"
 )
 
+type InitChanMsg struct {
+	lrcpb.Event_Init
+	*string
+}
+
+type MediaInitChanMsg struct {
+	lrcpb.Event_Mediainit
+	*string
+}
+
 type options struct {
-	uri      string
-	secret   string
-	welcome  *string
-	writer   *io.Writer
-	verbose  bool
-	pubChan  chan PubEvent
-	initChan chan struct {
-		lrcpb.Event_Init
-		*string
-	}
-	mediainitChan chan struct {
-		lrcpb.Event_Mediainit
-		*string
-	}
-	initialID *uint32
-	resolver  func(externalID string, ctx context.Context) *string
+	uri           string
+	secret        string
+	welcome       *string
+	writer        *io.Writer
+	verbose       bool
+	pubChan       chan PubEvent
+	initChan      chan InitChanMsg
+	mediainitChan chan MediaInitChanMsg
+	initialID     *uint32
+	resolver      func(externalID string, ctx context.Context) *string
 }
 
 type Option func(option *options) error
@@ -64,10 +68,7 @@ func WithLogging(w io.Writer, verbose bool) Option {
 	}
 }
 
-func WithInitChannel(initChan chan struct {
-	lrcpb.Event_Init
-	*string
-}) Option {
+func WithInitChannel(initChan chan InitChanMsg) Option {
 	return func(options *options) error {
 		if initChan == nil {
 			return errors.New("must provide a channel")
@@ -77,10 +78,7 @@ func WithInitChannel(initChan chan struct {
 	}
 }
 
-func WithMediainitChannel(mediainitChan chan struct {
-	lrcpb.Event_Mediainit
-	*string
-}) Option {
+func WithMediainitChannel(mediainitChan chan MediaInitChanMsg) Option {
 	return func(options *options) error {
 		if mediainitChan == nil {
 			return errors.New("must provide a channel")

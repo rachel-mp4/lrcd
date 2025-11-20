@@ -16,30 +16,24 @@ import (
 )
 
 type Server struct {
-	secret      string
-	uri         string
-	eventBus    chan clientEvent
-	ctx         context.Context
-	cancel      context.CancelFunc
-	clients     map[*client]bool
-	clientsMu   sync.Mutex
-	idmapsMu    sync.Mutex
-	idToClient  map[uint32]*client
-	lastID      uint32
-	logger      *log.Logger
-	debugLogger *log.Logger
-	welcomeEvt  []byte
-	pongEvt     []byte
-	initChan    chan struct {
-		lrcpb.Event_Init
-		*string
-	}
-	mediainitChan chan struct {
-		lrcpb.Event_Mediainit
-		*string
-	}
-	resolver func(externalID string, ctx context.Context) *string
-	pubChan  chan PubEvent
+	secret        string
+	uri           string
+	eventBus      chan clientEvent
+	ctx           context.Context
+	cancel        context.CancelFunc
+	clients       map[*client]bool
+	clientsMu     sync.Mutex
+	idmapsMu      sync.Mutex
+	idToClient    map[uint32]*client
+	lastID        uint32
+	logger        *log.Logger
+	debugLogger   *log.Logger
+	welcomeEvt    []byte
+	pongEvt       []byte
+	initChan      chan InitChanMsg
+	mediainitChan chan MediaInitChanMsg
+	resolver      func(externalID string, ctx context.Context) *string
+	pubChan       chan PubEvent
 }
 
 type PubEvent struct {
