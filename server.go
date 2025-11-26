@@ -678,7 +678,9 @@ func (s *Server) handleSet(msg *lrcpb.Event_Set, client *client) {
 	if externalId != nil {
 		externid := *externalId
 		client.externID = &externid
-		client.rcancel()
+		if client.rcancel != nil {
+			client.rcancel()
+		}
 		if s.resolver != nil {
 			go func() {
 				ctx, cancel := context.WithCancel(client.ctx)
