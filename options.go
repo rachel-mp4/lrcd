@@ -29,6 +29,7 @@ type options struct {
 	mediainitChan chan MediaInitChanMsg
 	initialID     *uint32
 	resolver      func(externalID string, ctx context.Context) *string
+	allocateID    func() uint32
 }
 
 type Option func(option *options) error
@@ -53,6 +54,16 @@ func WithWelcome(welcome string) Option {
 func WithInitialID(id uint32) Option {
 	return func(options *options) error {
 		options.initialID = &id
+		return nil
+	}
+}
+
+func WithIDAllocator(a func() uint32) Option {
+	return func(options *options) error {
+		if a == nil {
+			return errors.New("must provide an allocator func")
+		}
+		options.allocateID = a
 		return nil
 	}
 }

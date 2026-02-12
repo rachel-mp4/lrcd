@@ -34,6 +34,7 @@ type Server struct {
 	mediainitChan chan MediaInitChanMsg
 	resolver      func(externalID string, ctx context.Context) *string
 	pubChan       chan PubEvent
+	allocateID    func() uint32
 }
 
 type PubEvent struct {
@@ -96,6 +97,13 @@ func NewServer(opts ...Option) (*Server, error) {
 	}
 	if options.pubChan != nil {
 		s.pubChan = options.pubChan
+	}
+	if options.allocateID != nil {
+		s.allocateID = options.allocateID
+	} else {
+		s.allocateID = func() uint32 {
+			return s.lastID + 1
+		}
 	}
 	if options.initialID != nil {
 		s.lastID = *options.initialID
@@ -347,7 +355,7 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 		return
 	}
 	s.idmapsMu.Lock()
-	newID := s.lastID + 1
+	newID := s.allocateID()
 	s.lastID = newID
 	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
@@ -412,7 +420,7 @@ func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
 	}
 	s.idmapsMu.Lock()
 	s.logDebug("handling media init")
-	newID := s.lastID + 1
+	newID := s.allocateID()
 	s.lastID = newID
 	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
