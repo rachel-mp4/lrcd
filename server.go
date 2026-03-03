@@ -176,6 +176,11 @@ func (s *Server) StopIfEmpty() bool {
 	return false
 }
 
+func (s *Server) SendReply(reply *lrcpb.Event_Attachreply) {
+	event := lrcpb.Event{Msg: reply}
+	s.broadcast(&event, nil)
+}
+
 func (s *Server) WSHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		upgrader := &websocket.Upgrader{
@@ -343,6 +348,10 @@ func (s *Server) broadcaster() {
 				s.handleGet(msg, client)
 			case *lrcpb.Event_Editbatch:
 				s.handleEditBatch(msg, client)
+			case *lrcpb.Event_Attachreply:
+				s.handleAttachReply(msg, client)
+			case *lrcpb.Event_Detachreply:
+				s.handleDetachReply(msg, client)
 			}
 
 		}
@@ -585,12 +594,13 @@ func deleteBtwnUTF16Indices(base string, start uint32, end uint32) (string, erro
 	resultRunes := utf16.Decode(result)
 	return string(resultRunes), nil
 }
+
 func (s *Server) broadcast(event *lrcpb.Event, client *client) {
 	data, _ := proto.Marshal(event)
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 	for c := range s.clients {
-		if client.mutedBy[c] {
+		if client != nil && client.mutedBy[c] {
 			continue
 		}
 		select {
@@ -598,7 +608,7 @@ func (s *Server) broadcast(event *lrcpb.Event, client *client) {
 			s.logDebug("b")
 		default:
 			s.log("kicked client")
-			client.cancel()
+			c.cancel()
 		}
 	}
 }
@@ -719,6 +729,33 @@ func (s *Server) handleGet(msg *lrcpb.Event_Get, client *client) {
 		data, _ := proto.Marshal(e)
 		client.dataChan <- data
 	}
+
+}
+
+func (s *Server) handleAttachReply(msg *lrcpb.Event_Attachreply, client *client) {
+	curId := client.textID
+	if curId == nil {
+		curId = client.mediaID
+		if curId == nil {
+			return
+		}
+	}
+	msg.Attachreply.From = curId
+	event := lrcpb.Event{Msg: msg}
+	s.broadcast(&event, client)
+}
+
+func (s *Server) handleDetachReply(msg *lrcpb.Event_Detachreply, client *client) {
+	curId := client.textID
+	if curId == nil {
+		curId = client.mediaID
+		if curId == nil {
+			return
+		}
+	}
+	msg.Detachreply.From = curId
+	event := lrcpb.Event{Msg: msg}
+	s.broadcast(&event, client)
 }
 
 // logDebug debugs unless in production
