@@ -6,6 +6,8 @@ github.com/rachel-mp4/lrcproto v1.2.0 h1:nZI80WQKO6yKgX0O5H6OO1cM/tiJqugs0p52KCo
 github.com/rachel-mp4/lrcproto v1.2.0/go.mod h1:hQzO36tQELGbkmRnUtKeM6NMU34t79ZcTlhM+MO7pHw=
 github.com/rachel-mp4/lrcproto v1.3.0 h1:ZLeGllHCdlUWDHtAwvuHLQWMaPy40ub5vJHALmnHOPg=
 github.com/rachel-mp4/lrcproto v1.3.0/go.mod h1:hQzO36tQELGbkmRnUtKeM6NMU34t79ZcTlhM+MO7pHw=
+github.com/rachel-mp4/lrcproto v1.3.1 h1:eYNv4VtlSaBJFowz+TOrwdpc7fT2drd6U+rjDJbSvKs=
+github.com/rachel-mp4/lrcproto v1.3.1/go.mod h1:hQzO36tQELGbkmRnUtKeM6NMU34t79ZcTlhM+MO7pHw=
 golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543 h1:E7g+9GITq07hpfrRu66IVDexMakfv52eLZ2CXBWiKr4=
 golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 google.golang.org/protobuf v1.36.6 h1:z1NpPI8ku2WgiWnf+t9wTPsn6eP1L7ksHUlkfLvd9xY=

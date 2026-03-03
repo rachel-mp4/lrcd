@@ -181,6 +181,11 @@ func (s *Server) SendReply(reply *lrcpb.Event_Attachreply) {
 	s.broadcast(&event, nil)
 }
 
+func (s *Server) SendReplyBatch(replies *lrcpb.Event_Replybatch) {
+	event := lrcpb.Event{Msg: replies}
+	s.broadcast(&event, nil)
+}
+
 func (s *Server) WSHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		upgrader := &websocket.Upgrader{
