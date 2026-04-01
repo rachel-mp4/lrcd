@@ -31,6 +31,7 @@ type options struct {
 	resolver      func(externalID string, ctx context.Context) *string
 	allocateID    func() uint32
 	cseid         bool //consumer sets external id
+	toReply       func(uint32) string
 }
 
 type Option func(option *options) error
@@ -121,6 +122,13 @@ func WithServerURIAndSecret(uri string, secret string) Option {
 	return func(options *options) error {
 		options.secret = secret
 		options.uri = uri
+		return nil
+	}
+}
+
+func WithYapper(toReply func(uint32) string) Option {
+	return func(options *options) error {
+		options.toReply = toReply
 		return nil
 	}
 }

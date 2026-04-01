@@ -25,6 +25,7 @@ type Server struct {
 	clientsMu     sync.Mutex
 	idmapsMu      sync.Mutex
 	idToClient    map[uint32]*client
+	yapids        map[uint32]bool
 	lastID        uint32
 	logger        *log.Logger
 	debugLogger   *log.Logger
@@ -36,6 +37,7 @@ type Server struct {
 	pubChan       chan PubEvent
 	allocateID    func() uint32
 	cseid         bool //consumer sets external id
+	toReply       func(uint32) string
 }
 
 type PubEvent struct {
@@ -59,6 +61,7 @@ type client struct {
 	resolvID *string
 	rcancel  context.CancelFunc
 	color    *uint32
+	yapChan  *chan struct{}
 }
 
 type clientEvent struct {
@@ -106,6 +109,9 @@ func NewServer(opts ...Option) (*Server, error) {
 			return s.lastID + 1
 		}
 	}
+	if options.toReply != nil {
+		s.toReply = options.toReply
+	}
 	if options.initialID != nil {
 		s.lastID = *options.initialID
 	}
@@ -115,6 +121,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.cseid = options.cseid
 
 	s.clients = make(map[*client]bool)
+	s.yapids = make(map[uint32]bool)
 	s.clientsMu = sync.Mutex{}
 	s.idmapsMu = sync.Mutex{}
 	s.idToClient = make(map[uint32]*client)
@@ -433,6 +440,11 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 		}
 	}
 	s.broadcastInit(msg, client)
+	if s.toReply != nil {
+		yc := make(chan struct{})
+		client.yapChan = &yc
+		go s.yap(client.nick, newID, yc)
+	}
 }
 
 func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
@@ -547,6 +559,10 @@ func (s *Server) handlePub(client *client) {
 	}
 	client.post = nil
 	s.broadcast(event, client)
+	if client.yapChan != nil {
+		close(*client.yapChan)
+		client.yapChan = nil
+	}
 }
 
 func (s *Server) handleMediapub(msg *lrcpb.Event_Mediapub, client *client) {
@@ -703,6 +719,9 @@ func (s *Server) handleMute(msg *lrcpb.Event_Mute, client *client) {
 	defer s.idmapsMu.Unlock()
 	clientToMute, ok := s.idToClient[toMute]
 	if !ok {
+		if s.yapids[toMute] {
+			go s.yapaftermute(client.nick)
+		}
 		return
 	}
 	if clientToMute == client {
