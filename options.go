@@ -30,6 +30,7 @@ type options struct {
 	initialID     *uint32
 	resolver      func(externalID string, ctx context.Context) *string
 	allocateID    func() uint32
+	cseid         bool //consumer sets external id
 }
 
 type Option func(option *options) error
@@ -40,6 +41,13 @@ func WithResolver(f func(externalID string, ctx context.Context) *string) Option
 			return errors.New("resolver must be non nil")
 		}
 		options.resolver = f
+		return nil
+	}
+}
+
+func WithConsumerSetExternalId() Option {
+	return func(options *options) error {
+		options.cseid = true
 		return nil
 	}
 }

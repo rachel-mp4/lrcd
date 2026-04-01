@@ -35,6 +35,7 @@ type Server struct {
 	resolver      func(externalID string, ctx context.Context) *string
 	pubChan       chan PubEvent
 	allocateID    func() uint32
+	cseid         bool //consumer sets external id
 }
 
 type PubEvent struct {
@@ -111,6 +112,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.uri = options.uri
 	s.secret = options.secret
 	s.resolver = options.resolver
+	s.cseid = options.cseid
 
 	s.clients = make(map[*client]bool)
 	s.clientsMu = sync.Mutex{}
@@ -186,7 +188,7 @@ func (s *Server) SendReplyBatch(replies *lrcpb.Event_Replybatch) {
 	s.broadcast(&event, nil)
 }
 
-func (s *Server) WSHandler() http.HandlerFunc {
+func (s *Server) wshandler(externalId *string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		upgrader := &websocket.Upgrader{
 			Subprotocols: []string{"lrc.v1"},
@@ -219,6 +221,7 @@ func (s *Server) WSHandler() http.HandlerFunc {
 			muteMap:  make(map[*client]bool, 0),
 			mutedBy:  make(map[*client]bool, 0),
 			myIDs:    make([]uint32, 0),
+			externID: externalId,
 		}
 
 		s.clientsMu.Lock()
@@ -254,6 +257,33 @@ func (s *Server) WSHandler() http.HandlerFunc {
 
 		conn.Close()
 		s.logDebug("closed ws connection")
+	}
+}
+
+func (s *Server) WSHandler() http.HandlerFunc {
+	if s.cseid {
+		panic("server created with ConsumerSetsExternalID, so use WSHandlerExternal method")
+	}
+	return s.wshandler(nil)
+}
+
+func (s *Server) WSHandlerExternal(externalId string) http.HandlerFunc {
+	if !s.cseid {
+		return s.wshandler(nil)
+	}
+	return s.wshandler(&externalId)
+}
+
+// a bit slow, but we don't care for now
+func (s *Server) KickExternalId(externalId string) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	for client := range s.clients {
+		if client.externID != nil {
+			if *client.externID == externalId {
+				client.cancel()
+			}
+		}
 	}
 }
 
@@ -379,7 +409,16 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	client.post = &newpost
 	msg.Init.Id = &newID
 	msg.Init.Nick = client.nick
-	msg.Init.ExternalID = client.externID
+	// right now i am lazy to add an actual field to set if a reply should be
+	// anonymous, so user can explicitly set their external id to be empty string
+	// (which should not be a valid external id in most applications)
+	// for the time being
+	// fix this later march 30 2026
+	if msg.Init.ExternalID == nil || *msg.Init.ExternalID != "" {
+		msg.Init.ExternalID = client.externID
+	} else {
+		msg.Init.ExternalID = nil
+	}
 	msg.Init.Color = client.color
 	echoed := false
 	msg.Init.Echoed = &echoed
@@ -697,20 +736,22 @@ func (s *Server) handleSet(msg *lrcpb.Event_Set, client *client) {
 			client.nick = &nickname
 		}
 	}
-	externalId := msg.Set.ExternalID
-	if externalId != nil {
-		externid := *externalId
-		client.externID = &externid
-		if client.rcancel != nil {
-			client.rcancel()
-		}
-		if s.resolver != nil {
-			go func() {
-				ctx, cancel := context.WithCancel(client.ctx)
-				client.rcancel = cancel
-				resolvid := s.resolver(externid, ctx)
-				client.resolvID = resolvid
-			}()
+	if !s.cseid {
+		externalId := msg.Set.ExternalID
+		if externalId != nil {
+			externid := *externalId
+			client.externID = &externid
+			if client.rcancel != nil {
+				client.rcancel()
+			}
+			if s.resolver != nil {
+				go func() {
+					ctx, cancel := context.WithCancel(client.ctx)
+					client.rcancel = cancel
+					resolvid := s.resolver(externid, ctx)
+					client.resolvID = resolvid
+				}()
+			}
 		}
 	}
 	color := msg.Set.Color
