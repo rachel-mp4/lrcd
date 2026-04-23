@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/gorilla/websocket"
-	"github.com/rachel-mp4/lrcproto/gen/go"
-	"google.golang.org/protobuf/proto"
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 	"unicode/utf16"
+
+	"github.com/gorilla/websocket"
+	"github.com/rachel-mp4/lrcproto/gen/go"
+	"google.golang.org/protobuf/proto"
 )
 
 type Server struct {
@@ -25,6 +27,8 @@ type Server struct {
 	clientsMu     sync.Mutex
 	idmapsMu      sync.Mutex
 	idToClient    map[uint32]*client
+	exidToClients map[string][]*client
+	exidtocmu     sync.Mutex
 	lastID        uint32
 	logger        *log.Logger
 	debugLogger   *log.Logger
@@ -36,6 +40,7 @@ type Server struct {
 	pubChan       chan PubEvent
 	allocateID    func() uint32
 	cseid         bool //consumer sets external id
+	slowcleanup   *time.Duration
 }
 
 type PubEvent struct {
@@ -59,6 +64,7 @@ type client struct {
 	resolvID *string
 	rcancel  context.CancelFunc
 	color    *uint32
+	mu       sync.Mutex
 }
 
 type clientEvent struct {
@@ -109,12 +115,16 @@ func NewServer(opts ...Option) (*Server, error) {
 	if options.initialID != nil {
 		s.lastID = *options.initialID
 	}
+	if options.slowcleanup != nil {
+		s.slowcleanup = options.slowcleanup
+	}
 	s.uri = options.uri
 	s.secret = options.secret
 	s.resolver = options.resolver
 	s.cseid = options.cseid
 
 	s.clients = make(map[*client]bool)
+	s.exidToClients = make(map[string][]*client)
 	s.clientsMu = sync.Mutex{}
 	s.idmapsMu = sync.Mutex{}
 	s.idToClient = make(map[uint32]*client)
@@ -188,6 +198,35 @@ func (s *Server) SendReplyBatch(replies *lrcpb.Event_Replybatch) {
 	s.broadcast(&event, nil)
 }
 
+var ErrIDDNE = errors.New("provided id does not exist")
+var ErrIDDone = errors.New("provided id has been published")
+
+// GetExternIDAndBodyFrom returns the current externalId and post body from an in-progress
+// message id. If the message has been finished, it will just return the externalId. since
+// external id can be reset at any time in default configuration, this provides most valuable
+// information when used WithConsumerSetsExternalID option
+func (s *Server) GetExternIDAndBodyFrom(id uint32) (extern *string, body *string, err error) {
+	s.idmapsMu.Lock()
+	defer s.idmapsMu.Unlock()
+	c, ok := s.idToClient[id]
+	if !ok {
+		return nil, nil, ErrIDDNE
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.externID != nil {
+		e := *c.externID
+		extern = &e
+	}
+	if c.post != nil && *c.textID == id {
+		b := *c.post
+		body = &b
+	} else {
+		err = ErrIDDone
+	}
+	return
+}
+
 func (s *Server) wshandler(externalId *string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		upgrader := &websocket.Upgrader{
@@ -213,7 +252,7 @@ func (s *Server) wshandler(externalId *string) http.HandlerFunc {
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
-		client := &client{
+		cli := &client{
 			conn:     conn,
 			dataChan: make(chan []byte, 100),
 			ctx:      ctx,
@@ -225,37 +264,56 @@ func (s *Server) wshandler(externalId *string) http.HandlerFunc {
 		}
 
 		s.clientsMu.Lock()
-		s.clients[client] = true
+		s.clients[cli] = true
 		s.clientsMu.Unlock()
+		if externalId != nil {
+			s.exidtocmu.Lock()
+			clis := s.exidToClients[*externalId]
+			s.exidToClients[*externalId] = append(clis, cli)
+			s.exidtocmu.Unlock()
+			if len(clis) > 20 {
+				s.log(fmt.Sprintf("that's a lot of clients: %s", *externalId))
+			}
+		}
 
 		// lifetime
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); s.wsWriter(client) }()
-		go func() { defer wg.Done(); s.listenToWS(client) }()
 		s.logDebug("new ws connection!")
-		wg.Wait()
+		go s.wsListener(cli)
+		s.wsWriter(cli)
 
 		// clean up
 		s.clientsMu.Lock()
-		delete(s.clients, client)
-		close(client.dataChan)
+		delete(s.clients, cli)
+		close(cli.dataChan)
 		s.clientsMu.Unlock()
-		s.handlePub(client)
+		// it's better to send on event bus to avoid race conditions
+		s.eventBus <- clientEvent{cli, &lrcpb.Event{Msg: &lrcpb.Event_Pub{Pub: &lrcpb.Pub{}}}}
+		s.eventBus <- clientEvent{cli, &lrcpb.Event{Msg: &lrcpb.Event_Mediapub{Mediapub: &lrcpb.MediaPub{}}}}
+		if cli.externID != nil {
+			s.exidtocmu.Lock()
+			clis := s.exidToClients[*cli.externID]
+			s.exidToClients[*cli.externID] = slices.DeleteFunc(clis, func(c *client) bool {
+				return cli == c
+			})
+			s.exidtocmu.Unlock()
+		}
+
+		if s.slowcleanup != nil {
+			time.Sleep(*s.slowcleanup)
+		}
 
 		s.idmapsMu.Lock()
-		for _, id := range client.myIDs { // remove myself from the idToClient map
+		for _, id := range cli.myIDs { // remove myself from the idToClient map
 			delete(s.idToClient, id)
 		}
-		for mutedClient := range client.muteMap { // remove myself from everyone that I muted's backreference map
-			delete(mutedClient.mutedBy, client)
+		for mutedClient := range cli.muteMap { // remove myself from everyone that I muted's backreference map
+			delete(mutedClient.mutedBy, cli)
 		}
-		for mutingClient := range client.mutedBy { // remove myself from everyone who muted me
-			delete(mutingClient.muteMap, client)
+		for mutingClient := range cli.mutedBy { // remove myself from everyone who muted me
+			delete(mutingClient.muteMap, cli)
 		}
 		s.idmapsMu.Unlock()
 
-		conn.Close()
 		s.logDebug("closed ws connection")
 	}
 }
@@ -274,20 +332,19 @@ func (s *Server) WSHandlerExternal(externalId string) http.HandlerFunc {
 	return s.wshandler(&externalId)
 }
 
-// a bit slow, but we don't care for now
 func (s *Server) KickExternalId(externalId string) {
-	s.clientsMu.Lock()
-	defer s.clientsMu.Unlock()
-	for client := range s.clients {
-		if client.externID != nil {
-			if *client.externID == externalId {
-				client.cancel()
-			}
-		}
+	s.exidtocmu.Lock()
+	clis, ok := s.exidToClients[externalId]
+	s.exidtocmu.Unlock()
+	if !ok {
+		return
+	}
+	for _, cli := range clis {
+		cli.cancel()
 	}
 }
 
-func (s *Server) listenToWS(client *client) {
+func (s *Server) wsListener(client *client) {
 	for {
 		select {
 		case <-client.ctx.Done():
@@ -316,6 +373,8 @@ func (s *Server) listenToWS(client *client) {
 }
 
 func (s *Server) wsWriter(client *client) {
+	defer client.conn.Close()
+	defer client.conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
 	ticker := time.NewTicker(15 * time.Second)
 	for {
 		select {
@@ -388,14 +447,15 @@ func (s *Server) broadcaster() {
 			case *lrcpb.Event_Detachreply:
 				s.handleDetachReply(msg, client)
 			}
-
 		}
 	}
 }
 
 func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
+	client.mu.Lock()
 	curID := client.textID
 	if curID != nil {
+		client.mu.Unlock()
 		return
 	}
 	s.idmapsMu.Lock()
@@ -407,6 +467,7 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	client.myIDs = append(client.myIDs, newID)
 	newpost := ""
 	client.post = &newpost
+	client.mu.Unlock()
 	msg.Init.Id = &newID
 	msg.Init.Nick = client.nick
 	// right now i am lazy to add an actual field to set if a reply should be
@@ -477,8 +538,10 @@ func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
 	s.lastID = newID
 	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
+	client.mu.Lock()
 	client.mediaID = &newID
 	client.myIDs = append(client.myIDs, newID)
+	client.mu.Unlock()
 	msg.Mediainit.Id = &newID
 	msg.Mediainit.Nick = client.nick
 	msg.Mediainit.ExternalID = client.externID
@@ -530,8 +593,10 @@ func (s *Server) broadcastMediainit(msg *lrcpb.Event_Mediainit, client *client) 
 }
 
 func (s *Server) handlePub(client *client) {
+	client.mu.Lock()
 	curID := client.textID
 	if curID == nil {
+		client.mu.Unlock()
 		return
 	}
 	client.textID = nil
@@ -546,15 +611,22 @@ func (s *Server) handlePub(client *client) {
 		}
 	}
 	client.post = nil
+	client.mu.Unlock()
 	s.broadcast(event, client)
 }
 
 func (s *Server) handleMediapub(msg *lrcpb.Event_Mediapub, client *client) {
+	if msg == nil || msg.Mediapub == nil {
+		return
+	}
+	client.mu.Lock()
 	curID := client.mediaID
 	if curID == nil {
+		client.mu.Unlock()
 		return
 	}
 	client.mediaID = nil
+	client.mu.Unlock()
 	msg.Mediapub.Id = curID
 	body := "external media."
 	if msg.Mediapub.Alt != nil {
@@ -577,15 +649,19 @@ func (s *Server) handleMediapub(msg *lrcpb.Event_Mediapub, client *client) {
 }
 
 func (s *Server) handleInsert(msg *lrcpb.Event_Insert, client *client) {
+	client.mu.Lock()
 	curID := client.textID
 	if curID == nil {
+		client.mu.Unlock()
 		return
 	}
 	newpost, err := insertAtUTF16Index(*client.post, msg.Insert.GetUtf16Index(), msg.Insert.GetBody())
 	if err != nil {
+		client.mu.Unlock()
 		return
 	}
 	client.post = &newpost
+	client.mu.Unlock()
 	msg.Insert.Id = curID
 	event := &lrcpb.Event{Msg: msg}
 	s.broadcast(event, client)
@@ -609,15 +685,19 @@ func insertAtUTF16Index(base string, index uint32, insert string) (string, error
 }
 
 func (s *Server) handleDelete(msg *lrcpb.Event_Delete, client *client) {
+	client.mu.Lock()
 	curID := client.textID
 	if curID == nil {
+		client.mu.Unlock()
 		return
 	}
 	newPost, err := deleteBtwnUTF16Indices(*client.post, msg.Delete.GetUtf16Start(), msg.Delete.GetUtf16End())
 	if err != nil {
+		client.mu.Unlock()
 		return
 	}
 	client.post = &newPost
+	client.mu.Unlock()
 	msg.Delete.Id = curID
 	event := &lrcpb.Event{Msg: msg}
 	s.broadcast(event, client)
@@ -639,12 +719,12 @@ func deleteBtwnUTF16Indices(base string, start uint32, end uint32) (string, erro
 	return string(resultRunes), nil
 }
 
-func (s *Server) broadcast(event *lrcpb.Event, client *client) {
+func (s *Server) broadcast(event *lrcpb.Event, cli *client) {
 	data, _ := proto.Marshal(event)
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 	for c := range s.clients {
-		if client != nil && client.mutedBy[c] {
+		if cli != nil && cli.mutedBy[c] {
 			continue
 		}
 		select {
@@ -678,7 +758,9 @@ func (s *Server) handleEditBatch(msg *lrcpb.Event_Editbatch, client *client) {
 			}
 		}
 	}
+	client.mu.Lock()
 	client.post = &plorp
+	client.mu.Unlock()
 	event := &lrcpb.Event{Msg: msg, Id: curID}
 	data, _ := proto.Marshal(event)
 	s.clientsMu.Lock()
@@ -728,28 +810,42 @@ func (s *Server) handleUnmute(msg *lrcpb.Event_Unmute, client *client) {
 	delete(client.muteMap, clientToMute)
 }
 
-func (s *Server) handleSet(msg *lrcpb.Event_Set, client *client) {
+func (s *Server) handleSet(msg *lrcpb.Event_Set, cli *client) {
+	cli.mu.Lock()
+	defer cli.mu.Unlock()
 	nick := msg.Set.Nick
 	if nick != nil {
 		nickname := *nick
 		if len(nickname) <= 16 {
-			client.nick = &nickname
+			cli.nick = &nickname
 		}
 	}
 	if !s.cseid {
 		externalId := msg.Set.ExternalID
 		if externalId != nil {
 			externid := *externalId
-			client.externID = &externid
-			if client.rcancel != nil {
-				client.rcancel()
+			s.exidtocmu.Lock()
+			if cli.externID != nil {
+				clis := s.exidToClients[*cli.externID]
+				s.exidToClients[*cli.externID] = slices.DeleteFunc(clis, func(c *client) bool {
+					return c == cli
+				})
+			}
+			cli.externID = &externid
+			clis := s.exidToClients[externid]
+			s.exidToClients[externid] = append(clis, cli)
+			s.exidtocmu.Unlock()
+			if cli.rcancel != nil {
+				cli.rcancel()
 			}
 			if s.resolver != nil {
 				go func() {
-					ctx, cancel := context.WithCancel(client.ctx)
-					client.rcancel = cancel
+					ctx, cancel := context.WithCancel(cli.ctx)
+					cli.rcancel = cancel
 					resolvid := s.resolver(externid, ctx)
-					client.resolvID = resolvid
+					cli.mu.Lock()
+					cli.resolvID = resolvid
+					cli.mu.Unlock()
 				}()
 			}
 		}
@@ -758,7 +854,7 @@ func (s *Server) handleSet(msg *lrcpb.Event_Set, client *client) {
 	if color != nil {
 		c := *color
 		if c <= 0xffffff {
-			client.color = &c
+			cli.color = &c
 		}
 	}
 }
@@ -775,7 +871,6 @@ func (s *Server) handleGet(msg *lrcpb.Event_Get, client *client) {
 		data, _ := proto.Marshal(e)
 		client.dataChan <- data
 	}
-
 }
 
 func (s *Server) handleAttachReply(msg *lrcpb.Event_Attachreply, client *client) {

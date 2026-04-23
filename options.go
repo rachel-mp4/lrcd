@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	lrcpb "github.com/rachel-mp4/lrcproto/gen/go"
 )
@@ -31,6 +32,7 @@ type options struct {
 	resolver      func(externalID string, ctx context.Context) *string
 	allocateID    func() uint32
 	cseid         bool //consumer sets external id
+	slowcleanup   *time.Duration
 }
 
 type Option func(option *options) error
@@ -121,6 +123,16 @@ func WithServerURIAndSecret(uri string, secret string) Option {
 	return func(options *options) error {
 		options.secret = secret
 		options.uri = uri
+		return nil
+	}
+}
+
+func WithSlowCleanup(d time.Duration) Option {
+	return func(option *options) error {
+		if d < 0 {
+			return errors.New("duration must be positive")
+		}
+		option.slowcleanup = &d
 		return nil
 	}
 }
