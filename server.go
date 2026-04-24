@@ -278,13 +278,12 @@ func (s *Server) wshandler(externalId *string) http.HandlerFunc {
 
 		// lifetime
 		s.logDebug("new ws connection!")
-		go s.wsListener(cli)
+		go s.wsReader(cli)
 		s.wsWriter(cli)
 
 		// clean up
 		s.clientsMu.Lock()
 		delete(s.clients, cli)
-		close(cli.dataChan)
 		s.clientsMu.Unlock()
 		// it's better to send on event bus to avoid race conditions
 		s.eventBus <- clientEvent{cli, &lrcpb.Event{Msg: &lrcpb.Event_Pub{Pub: &lrcpb.Pub{}}}}
@@ -339,12 +338,17 @@ func (s *Server) KickExternalId(externalId string) {
 	if !ok {
 		return
 	}
+	e := &lrcpb.Event{Msg: &lrcpb.Event_Kick{Kick: &lrcpb.Kick{Privileges: &lrcpb.Sudo{Secret: s.secret}}}}
 	for _, cli := range clis {
-		cli.cancel()
+		select {
+		case s.eventBus <- clientEvent{cli, e}:
+		default:
+			cli.cancel()
+		}
 	}
 }
 
-func (s *Server) wsListener(client *client) {
+func (s *Server) wsReader(client *client) {
 	for {
 		select {
 		case <-client.ctx.Done():
@@ -446,6 +450,8 @@ func (s *Server) broadcaster() {
 				s.handleAttachReply(msg, client)
 			case *lrcpb.Event_Detachreply:
 				s.handleDetachReply(msg, client)
+			case *lrcpb.Event_Kick:
+				s.handleKick(msg, client)
 			}
 		}
 	}
@@ -897,6 +903,18 @@ func (s *Server) handleDetachReply(msg *lrcpb.Event_Detachreply, client *client)
 	msg.Detachreply.From = curId
 	event := lrcpb.Event{Msg: msg}
 	s.broadcast(&event, client)
+}
+
+func (s *Server) handleKick(msg *lrcpb.Event_Kick, cli *client) {
+	if msg.Kick != nil && msg.Kick.Privileges != nil && msg.Kick.Privileges.Secret == s.secret {
+		kick := &lrcpb.Event{Msg: &lrcpb.Event_Kick{Kick: &lrcpb.Kick{}}}
+		data, _ := proto.Marshal(kick)
+		cli.dataChan <- data
+		s.clientsMu.Lock()
+		delete(s.clients, cli)
+		close(cli.dataChan)
+		s.clientsMu.Unlock()
+	}
 }
 
 // logDebug debugs unless in production
