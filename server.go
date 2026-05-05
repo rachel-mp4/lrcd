@@ -49,22 +49,27 @@ type PubEvent struct {
 }
 
 type client struct {
-	conn     *websocket.Conn
-	dataChan chan []byte
-	ctx      context.Context
-	cancel   context.CancelFunc
-	muteMap  map[*client]bool
-	mutedBy  map[*client]bool
-	myIDs    []uint32
-	textID   *uint32
-	mediaID  *uint32
-	post     *string
-	nick     *string
-	externID *string
-	resolvID *string
-	rcancel  context.CancelFunc
-	color    *uint32
-	mu       sync.Mutex
+	conn      *websocket.Conn
+	dataChan  chan []byte
+	ctx       context.Context
+	cancel    context.CancelFunc
+	muteMap   map[*client]bool
+	mutedBy   map[*client]bool
+	myIDs     []uint32
+	init      *lrcpb.Init
+	mediainit *lrcpb.MediaInit
+	text      []uint16
+	nick      *string
+	externID  *string
+	resolvID  *string
+	rcancel   context.CancelFunc
+	color     *uint32
+	mu        sync.Mutex
+}
+
+func (c *client) body() string {
+	t := utf16.Decode(c.text)
+	return string(t)
 }
 
 type clientEvent struct {
@@ -218,8 +223,8 @@ func (s *Server) GetExternIDAndBodyFrom(id uint32) (extern *string, body *string
 		e := *c.externID
 		extern = &e
 	}
-	if c.post != nil && *c.textID == id {
-		b := *c.post
+	if c.text != nil && c.init != nil && c.init.Id != nil && *c.init.Id == id {
+		b := c.body()
 		body = &b
 	} else {
 		err = ErrIDDone
@@ -259,8 +264,9 @@ func (s *Server) wshandler(externalId *string) http.HandlerFunc {
 			cancel:   cancel,
 			muteMap:  make(map[*client]bool, 0),
 			mutedBy:  make(map[*client]bool, 0),
-			myIDs:    make([]uint32, 0),
+			myIDs:    make([]uint32, 0, 8),
 			externID: externalId,
+			text:     make([]uint16, 0, 16),
 		}
 
 		s.clientsMu.Lock()
@@ -459,8 +465,8 @@ func (s *Server) broadcaster() {
 
 func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	client.mu.Lock()
-	curID := client.textID
-	if curID != nil {
+	init := client.init
+	if init != nil {
 		client.mu.Unlock()
 		return
 	}
@@ -469,11 +475,12 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	s.lastID = newID
 	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
-	client.textID = &newID
 	client.myIDs = append(client.myIDs, newID)
-	newpost := ""
-	client.post = &newpost
-	client.mu.Unlock()
+	if client.text == nil {
+		client.text = make([]uint16, 0, 16)
+	} else {
+		client.text = client.text[:0]
+	}
 	msg.Init.Id = &newID
 	msg.Init.Nick = client.nick
 	// right now i am lazy to add an actual field to set if a reply should be
@@ -490,6 +497,9 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	echoed := false
 	msg.Init.Echoed = &echoed
 	msg.Init.Nonce = nil
+	client.init = msg.Init
+	client.mu.Unlock()
+
 	if s.initChan != nil {
 		select {
 		case s.initChan <- InitChanMsg{*msg, client.resolvID}:
@@ -510,6 +520,8 @@ func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
 	msg.Init.Nonce = GenerateNonce(*msg.Init.Id, s.uri, s.secret)
 	echoEvent := &lrcpb.Event{Msg: msg}
 	echoData, _ := proto.Marshal(echoEvent)
+	msg.Init.Echoed = nil // unset fields since client has pointer to Init, which they
+	msg.Init.Nonce = nil  // may broadcast on get.Item
 	muteEvent := &lrcpb.Event{Msg: &lrcpb.Event_Mute{Mute: &lrcpb.Mute{Id: msg.Init.GetId()}}}
 	muteData, _ := proto.Marshal(muteEvent)
 	s.clientsMu.Lock()
@@ -534,8 +546,8 @@ func (s *Server) broadcastInit(msg *lrcpb.Event_Init, client *client) {
 }
 func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
 	s.logDebug("want to handle media init")
-	curId := client.mediaID
-	if curId != nil {
+	mediaInit := client.mediainit
+	if mediaInit != nil {
 		return
 	}
 	s.idmapsMu.Lock()
@@ -545,13 +557,13 @@ func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
 	s.idToClient[newID] = client
 	s.idmapsMu.Unlock()
 	client.mu.Lock()
-	client.mediaID = &newID
 	client.myIDs = append(client.myIDs, newID)
-	client.mu.Unlock()
 	msg.Mediainit.Id = &newID
 	msg.Mediainit.Nick = client.nick
 	msg.Mediainit.ExternalID = client.externID
 	msg.Mediainit.Color = client.color
+	client.mediainit = msg.Mediainit
+	client.mu.Unlock()
 	echoed := false
 	msg.Mediainit.Echoed = &echoed
 	msg.Mediainit.Nonce = nil
@@ -575,6 +587,8 @@ func (s *Server) broadcastMediainit(msg *lrcpb.Event_Mediainit, client *client) 
 	msg.Mediainit.Nonce = GenerateNonce(*msg.Mediainit.Id, s.uri, s.secret)
 	echoEvent := &lrcpb.Event{Msg: msg}
 	echoData, _ := proto.Marshal(echoEvent)
+	msg.Mediainit.Echoed = nil // unset fields now that we are done since client has pointer to Mediainit
+	msg.Mediainit.Nonce = nil
 	muteEvent := &lrcpb.Event{Msg: &lrcpb.Event_Mute{Mute: &lrcpb.Mute{Id: msg.Mediainit.GetId()}}}
 	muteData, _ := proto.Marshal(muteEvent)
 	s.clientsMu.Lock()
@@ -600,23 +614,32 @@ func (s *Server) broadcastMediainit(msg *lrcpb.Event_Mediainit, client *client) 
 
 func (s *Server) handlePub(client *client) {
 	client.mu.Lock()
-	curID := client.textID
+	init := client.init
+	if init == nil {
+		client.mu.Unlock()
+		return
+	}
+	curID := init.Id
 	if curID == nil {
 		client.mu.Unlock()
 		return
 	}
-	client.textID = nil
+	client.init = nil
 	event := &lrcpb.Event{Msg: &lrcpb.Event_Pub{Pub: &lrcpb.Pub{Id: curID}}}
 	if s.pubChan != nil {
 		select {
-		case s.pubChan <- PubEvent{ID: *curID, Body: *client.post}:
+		case s.pubChan <- PubEvent{ID: *curID, Body: client.body()}:
 		default:
 			s.log("pubchan blocked, closing channel")
 			close(s.pubChan)
 			s.pubChan = nil
 		}
 	}
-	client.post = nil
+	if cap(client.text) > 1024 { // idea is that in most cases it's ok to keep
+		client.text = nil // the client's text the same size as they've been typing
+	} else { // but 1024+ utf16 characters is a lot so likely they just pasted
+		client.text = client.text[:0] // a long thing and we can shrink their text
+	}
 	client.mu.Unlock()
 	s.broadcast(event, client)
 }
@@ -626,12 +649,17 @@ func (s *Server) handleMediapub(msg *lrcpb.Event_Mediapub, client *client) {
 		return
 	}
 	client.mu.Lock()
-	curID := client.mediaID
+	cid := client.mediainit
+	if cid == nil {
+		client.mu.Unlock()
+		return
+	}
+	curID := cid.Id
 	if curID == nil {
 		client.mu.Unlock()
 		return
 	}
-	client.mediaID = nil
+	client.mediainit = nil
 	client.mu.Unlock()
 	msg.Mediapub.Id = curID
 	body := "external media."
@@ -656,73 +684,99 @@ func (s *Server) handleMediapub(msg *lrcpb.Event_Mediapub, client *client) {
 
 func (s *Server) handleInsert(msg *lrcpb.Event_Insert, client *client) {
 	client.mu.Lock()
-	curID := client.textID
+	init := client.init
+	if init == nil {
+		client.mu.Unlock()
+		return
+	}
+	curID := init.Id
 	if curID == nil {
 		client.mu.Unlock()
 		return
 	}
-	newpost, err := insertAtUTF16Index(*client.post, msg.Insert.GetUtf16Index(), msg.Insert.GetBody())
+	err := client.applyInsert(msg.Insert.GetUtf16Index(), msg.Insert.GetBody())
 	if err != nil {
 		client.mu.Unlock()
 		return
 	}
-	client.post = &newpost
 	client.mu.Unlock()
 	msg.Insert.Id = curID
 	event := &lrcpb.Event{Msg: msg}
 	s.broadcast(event, client)
 }
 
-func insertAtUTF16Index(base string, index uint32, insert string) (string, error) {
-	runes := []rune(base)
-	baseUTF16Units := utf16.Encode(runes)
-	if uint32(len(baseUTF16Units)) < index {
-		return "", errors.New("index out of range")
+func (c *client) applyInsert(index uint32, s string) error {
+	idx := int(index)
+	runes := []rune(s)
+	su16 := utf16.Encode(runes)
+	su16len := len(su16)
+	ltext := len(c.text)
+	if ltext < idx { // inserting outside the bounds of the string, not allowed
+		return errors.New("index out of range")
+	} else if ltext == idx { // inserting just at the bounds of the string, ezpz
+		c.text = append(c.text, su16...)
+		return nil
+	} else { // inserting inside the bounds of the string, annoying cuz we have to copy stuff over
+		ctext := cap(c.text)
+		remainingCap := ctext - ltext
+		mustGainAtLeast := su16len - remainingCap
+		if mustGainAtLeast > 0 { // this stuff is here because we are manually growing to try and keep
+			fgrow := ctext * 2 // heap allocations to a minimum, so we're picking the max of either the
+			if ctext > 256 {   // standard grow algo (if cap < 256, double, otherwise x1.25), alongside
+				fgrow = (ctext * 5) / 4 // the actual amount we need to gain, so if someone posts a long
+			} // copypasta or whatever it only needs to do one heap allocation. might as well give some
+			growamt := max(fgrow, (mustGainAtLeast*5)/4) // room afterwards in the mgal case since it's
+			c.text = slices.Grow(c.text, growamt)        // likely they'll continue typing
+		}
+		res := c.text[:ltext+su16len]
+		for i, v := range slices.Backward(c.text[idx:]) { // backwards so we don't overwrite data we
+			res[idx+i+su16len] = v // care about, since res is still pointing at the same backing array
+		}
+		for i, v := range su16 {
+			res[idx+i] = v
+		}
+		c.text = res
+		return nil
 	}
-
-	insertRunes := []rune(insert)
-	insertUTF16Units := utf16.Encode(insertRunes)
-	result := make([]uint16, 0, len(baseUTF16Units)+len(insertUTF16Units))
-	result = append(result, baseUTF16Units[:index]...)
-	result = append(result, insertUTF16Units...)
-	result = append(result, baseUTF16Units[index:]...)
-	resultRunes := utf16.Decode(result)
-	return string(resultRunes), nil
 }
 
 func (s *Server) handleDelete(msg *lrcpb.Event_Delete, client *client) {
 	client.mu.Lock()
-	curID := client.textID
+	init := client.init
+	if init == nil {
+		client.mu.Unlock()
+		return
+	}
+	curID := init.Id
 	if curID == nil {
 		client.mu.Unlock()
 		return
 	}
-	newPost, err := deleteBtwnUTF16Indices(*client.post, msg.Delete.GetUtf16Start(), msg.Delete.GetUtf16End())
+	err := client.applyDelete(msg.Delete.GetUtf16Start(), msg.Delete.GetUtf16End())
+	client.mu.Unlock()
 	if err != nil {
-		client.mu.Unlock()
 		return
 	}
-	client.post = &newPost
-	client.mu.Unlock()
 	msg.Delete.Id = curID
 	event := &lrcpb.Event{Msg: msg}
 	s.broadcast(event, client)
 }
 
-func deleteBtwnUTF16Indices(base string, start uint32, end uint32) (string, error) {
+func (c *client) applyDelete(start uint32, end uint32) error {
 	if end <= start {
-		return "", errors.New("end must come after start")
+		return errors.New("end must come after start")
 	}
-	runes := []rune(base)
-	baseUTF16Units := utf16.Encode(runes)
-	if uint32(len(baseUTF16Units)) < end {
-		return "", errors.New("index out of range")
+	si := int(start)
+	ei := int(end)
+	ltext := len(c.text)
+	if ltext < ei {
+		return errors.New("index out of range")
 	}
-	result := make([]uint16, 0, uint32(len(baseUTF16Units))+start-end)
-	result = append(result, baseUTF16Units[:start]...)
-	result = append(result, baseUTF16Units[end:]...)
-	resultRunes := utf16.Decode(result)
-	return string(resultRunes), nil
+	for i, v := range c.text[ei:] { // thankfully delete is far simpler
+		c.text[si+i] = v // than insert, the only weird thing here is the
+	} // expression in the last line where we reslice to the new length:
+	c.text = c.text[:ltext-ei+si] // initial - (end - start)
+	return nil
 }
 
 func (s *Server) broadcast(event *lrcpb.Event, cli *client) {
@@ -744,28 +798,33 @@ func (s *Server) broadcast(event *lrcpb.Event, cli *client) {
 }
 
 func (s *Server) handleEditBatch(msg *lrcpb.Event_Editbatch, client *client) {
-	curID := client.textID
-	if curID == nil {
+	client.mu.Lock()
+	init := client.init
+	if init == nil {
+		client.mu.Unlock()
 		return
 	}
-	plorp := *client.post
-	var err error
+	curID := init.Id
+	if curID == nil {
+		client.mu.Unlock()
+		return
+	}
 	for _, edit := range msg.Editbatch.Edits {
 		switch edit := edit.Edit.(type) {
 		case *lrcpb.Edit_Insert:
-			plorp, err = insertAtUTF16Index(plorp, edit.Insert.GetUtf16Index(), edit.Insert.GetBody())
+			err := client.applyInsert(edit.Insert.GetUtf16Index(), edit.Insert.GetBody())
 			if err != nil {
+				client.mu.Unlock()
 				return
 			}
 		case *lrcpb.Edit_Delete:
-			plorp, err = deleteBtwnUTF16Indices(plorp, edit.Delete.GetUtf16Start(), edit.Delete.GetUtf16End())
+			err := client.applyDelete(edit.Delete.GetUtf16Start(), edit.Delete.GetUtf16End())
 			if err != nil {
+				client.mu.Unlock()
 				return
 			}
 		}
 	}
-	client.mu.Lock()
-	client.post = &plorp
 	client.mu.Unlock()
 	event := &lrcpb.Event{Msg: msg, Id: curID}
 	data, _ := proto.Marshal(event)
@@ -880,10 +939,22 @@ func (s *Server) handleGet(msg *lrcpb.Event_Get, client *client) {
 }
 
 func (s *Server) handleAttachReply(msg *lrcpb.Event_Attachreply, client *client) {
-	curId := client.textID
+	client.mu.Lock()
+	init := client.init
+	if init == nil {
+		client.mu.Unlock()
+		return
+	}
+	curId := init.Id
 	if curId == nil {
-		curId = client.mediaID
+		mediainit := client.mediainit
+		if mediainit == nil {
+			client.mu.Unlock()
+			return
+		}
+		curId = mediainit.Id
 		if curId == nil {
+			client.mu.Unlock()
 			return
 		}
 	}
@@ -893,13 +964,26 @@ func (s *Server) handleAttachReply(msg *lrcpb.Event_Attachreply, client *client)
 }
 
 func (s *Server) handleDetachReply(msg *lrcpb.Event_Detachreply, client *client) {
-	curId := client.textID
+	client.mu.Lock()
+	init := client.init
+	if init == nil {
+		client.mu.Unlock()
+		return
+	}
+	curId := init.Id
 	if curId == nil {
-		curId = client.mediaID
+		mediainit := client.mediainit
+		if mediainit == nil {
+			client.mu.Unlock()
+			return
+		}
+		curId = mediainit.Id
 		if curId == nil {
+			client.mu.Unlock()
 			return
 		}
 	}
+	client.mu.Unlock()
 	msg.Detachreply.From = curId
 	event := lrcpb.Event{Msg: msg}
 	s.broadcast(&event, client)
