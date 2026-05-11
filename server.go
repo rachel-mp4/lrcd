@@ -560,7 +560,16 @@ func (s *Server) handleMediainit(msg *lrcpb.Event_Mediainit, client *client) {
 	client.myIDs = append(client.myIDs, newID)
 	msg.Mediainit.Id = &newID
 	msg.Mediainit.Nick = client.nick
-	msg.Mediainit.ExternalID = client.externID
+	// right now i am lazy to add an actual field to set if a reply should be
+	// anonymous, so user can explicitly set their external id to be empty string
+	// (which should not be a valid external id in most applications)
+	// for the time being
+	// fix this later march 30 2026
+	if msg.Mediainit.ExternalID == nil || *msg.Mediainit.ExternalID != "" {
+		msg.Mediainit.ExternalID = client.externID
+	} else {
+		msg.Mediainit.ExternalID = nil
+	}
 	msg.Mediainit.Color = client.color
 	client.mediainit = msg.Mediainit
 	client.mu.Unlock()
