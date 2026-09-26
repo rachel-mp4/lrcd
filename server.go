@@ -18,29 +18,30 @@ import (
 )
 
 type Server struct {
-	secret        string
-	uri           string
-	eventBus      chan clientEvent
-	ctx           context.Context
-	cancel        context.CancelFunc
-	clients       map[*client]bool
-	clientsMu     sync.Mutex
-	idmapsMu      sync.Mutex
-	idToClient    map[uint32]*client
-	exidToClients map[string][]*client
-	exidtocmu     sync.Mutex
-	lastID        uint32
-	logger        *log.Logger
-	debugLogger   *log.Logger
-	welcomeEvt    []byte
-	pongEvt       []byte
-	initChan      chan InitChanMsg
-	mediainitChan chan MediaInitChanMsg
-	resolver      func(externalID string, ctx context.Context) *string
-	pubChan       chan PubEvent
-	allocateID    func() uint32
-	cseid         bool //consumer sets external id
-	slowcleanup   *time.Duration
+	secret          string
+	uri             string
+	eventBus        chan clientEvent
+	ctx             context.Context
+	cancel          context.CancelFunc
+	clients         map[*client]bool
+	clientsMu       sync.Mutex
+	idmapsMu        sync.Mutex
+	idToClient      map[uint32]*client
+	exidToClients   map[string][]*client
+	exidtocmu       sync.Mutex
+	lastID          uint32
+	logger          *log.Logger
+	debugLogger     *log.Logger
+	welcomeEvt      []byte
+	pongEvt         []byte
+	initChan        chan InitChanMsg
+	mediainitChan   chan MediaInitChanMsg
+	resolver        func(externalID string, ctx context.Context) *string
+	pubChan         chan PubEvent
+	allocateID      func() uint32
+	cseid           bool //consumer sets external id
+	slowcleanup     *time.Duration
+	forceExternalId bool
 }
 
 type PubEvent struct {
@@ -73,8 +74,8 @@ func (c *client) body() string {
 }
 
 type clientEvent struct {
-	client *client
-	event  *lrcpb.Event
+	c     *client
+	event *lrcpb.Event
 }
 
 func NewServer(opts ...Option) (*Server, error) {
@@ -127,6 +128,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.secret = options.secret
 	s.resolver = options.resolver
 	s.cseid = options.cseid
+	s.forceExternalId = options.forceExternalId
 
 	s.clients = make(map[*client]bool)
 	s.exidToClients = make(map[string][]*client)
@@ -150,7 +152,7 @@ func (s *Server) setDefaultEvents(welcome string) {
 // Start starts a server, and returns an error if it has ever been started before
 func (s *Server) Start() error {
 	if s.ctx != nil {
-		return errors.New("cannot start already started server")
+		return ErrServerStarted
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	go s.broadcaster()
@@ -165,7 +167,7 @@ func (s *Server) Stop() (uint32, error) {
 	}
 	select {
 	case <-s.ctx.Done():
-		return s.lastID, errors.New("cannot stop already stopped server")
+		return s.lastID, ErrServerStopped
 	default:
 		s.cancel()
 		if s.initChan != nil {
@@ -202,9 +204,6 @@ func (s *Server) SendReplyBatch(replies *lrcpb.Event_Replybatch) {
 	event := lrcpb.Event{Msg: replies}
 	s.broadcast(&event, nil)
 }
-
-var ErrIDDNE = errors.New("provided id does not exist")
-var ErrIDDone = errors.New("provided id has been published")
 
 // GetExternIDAndBodyFrom returns the current externalId and post body from an in-progress
 // message id. If the message has been finished, it will just return the externalId. since
@@ -278,7 +277,7 @@ func (s *Server) wshandler(externalId *string) http.HandlerFunc {
 			s.exidToClients[*externalId] = append(clis, cli)
 			s.exidtocmu.Unlock()
 			if len(clis) > 20 {
-				s.log(fmt.Sprintf("that's a lot of clients: %s", *externalId))
+				s.log("that's a lot of clients: %s", *externalId)
 			}
 		}
 
@@ -354,62 +353,62 @@ func (s *Server) KickExternalId(externalId string) {
 	}
 }
 
-func (s *Server) wsReader(client *client) {
+func (s *Server) wsReader(c *client) {
 	for {
 		select {
-		case <-client.ctx.Done():
-			s.logDebug("exiting listenToWS: client done")
+		case <-c.ctx.Done():
+			s.logDebug("exiting wsReader: client done")
 			return
 		case <-s.ctx.Done():
-			s.logDebug("exiting listenToWS: server done")
+			s.logDebug("exiting wsReader: server done")
 			return
 		default:
-			_, data, err := client.conn.ReadMessage()
+			_, data, err := c.conn.ReadMessage()
 			if err != nil {
-				s.logDebug("canceling client: read error")
-				client.cancel()
+				s.logDebug("canceling client: %s", err.Error())
+				c.cancel()
 				return
 			}
 			var event lrcpb.Event
 			err = proto.Unmarshal(data, &event)
 			if err != nil {
-				s.logDebug(err.Error())
-				client.cancel()
+				s.logDebug("canceling client: %s", err.Error())
+				c.cancel()
 				return
 			}
-			s.eventBus <- clientEvent{client: client, event: &event}
+			s.eventBus <- clientEvent{c: c, event: &event}
 		}
 	}
 }
 
-func (s *Server) wsWriter(client *client) {
-	defer client.conn.Close()
-	defer client.conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
+func (s *Server) wsWriter(c *client) {
+	defer c.conn.Close()
+	defer c.conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
 	ticker := time.NewTicker(15 * time.Second)
 	for {
 		select {
 		case <-ticker.C:
-			err := client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			err := c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
 			if err != nil {
-				client.cancel()
+				c.cancel()
 				return
 			}
-		case <-client.ctx.Done():
+		case <-c.ctx.Done():
 			s.logDebug("exiting wsWriter: client done")
 			return
 		case <-s.ctx.Done():
 			s.logDebug("exiting wsWriter: server done")
 			return
-		case data, ok := <-client.dataChan:
+		case data, ok := <-c.dataChan:
 			if !ok {
 				s.logDebug("canceling client: dataChan closed")
-				client.cancel()
+				c.cancel()
 				return
 			}
-			err := client.conn.WriteMessage(websocket.BinaryMessage, data)
+			err := c.conn.WriteMessage(websocket.BinaryMessage, data)
 			if err != nil {
-				s.logDebug(err.Error())
-				client.cancel()
+				s.logDebug("canceling client: %s", err.Error())
+				c.cancel()
 				return
 			}
 		}
@@ -423,41 +422,41 @@ func (s *Server) broadcaster() {
 		case <-s.ctx.Done():
 			return
 		case ce := <-s.eventBus:
-			client := ce.client
+			c := ce.c
 			event := ce.event
 			switch msg := event.Msg.(type) {
 			case *lrcpb.Event_Ping:
-				client.dataChan <- s.pongEvt
+				c.dataChan <- s.pongEvt
 			case *lrcpb.Event_Pong:
 				continue
 			case *lrcpb.Event_Init:
-				s.handleInit(msg, client)
+				s.handleInit(msg, c)
 			case *lrcpb.Event_Mediainit:
-				s.handleMediainit(msg, client)
+				s.handleMediainit(msg, c)
 			case *lrcpb.Event_Pub:
-				s.handlePub(client)
+				s.handlePub(c)
 			case *lrcpb.Event_Mediapub:
-				s.handleMediapub(msg, client)
+				s.handleMediapub(msg, c)
 			case *lrcpb.Event_Insert:
-				s.handleInsert(msg, client)
+				s.handleInsert(msg, c)
 			case *lrcpb.Event_Delete:
-				s.handleDelete(msg, client)
+				s.handleDelete(msg, c)
 			case *lrcpb.Event_Mute:
-				s.handleMute(msg, client)
+				s.handleMute(msg, c)
 			case *lrcpb.Event_Unmute:
-				s.handleUnmute(msg, client)
+				s.handleUnmute(msg, c)
 			case *lrcpb.Event_Set:
-				s.handleSet(msg, client)
+				s.handleSet(msg, c)
 			case *lrcpb.Event_Get:
-				s.handleGet(msg, client)
+				s.handleGet(msg, c)
 			case *lrcpb.Event_Editbatch:
-				s.handleEditBatch(msg, client)
+				s.handleEditBatch(msg, c)
 			case *lrcpb.Event_Attachreply:
-				s.handleAttachReply(msg, client)
+				s.handleAttachReply(msg, c)
 			case *lrcpb.Event_Detachreply:
-				s.handleDetachReply(msg, client)
+				s.handleDetachReply(msg, c)
 			case *lrcpb.Event_Kick:
-				s.handleKick(msg, client)
+				s.handleKick(msg, c)
 			}
 		}
 	}
@@ -488,7 +487,7 @@ func (s *Server) handleInit(msg *lrcpb.Event_Init, client *client) {
 	// (which should not be a valid external id in most applications)
 	// for the time being
 	// fix this later march 30 2026
-	if msg.Init.ExternalID == nil || *msg.Init.ExternalID != "" {
+	if s.forceExternalId || msg.Init.ExternalID == nil || *msg.Init.ExternalID != "" {
 		msg.Init.ExternalID = client.externID
 	} else {
 		msg.Init.ExternalID = nil
@@ -1011,14 +1010,14 @@ func (s *Server) handleKick(msg *lrcpb.Event_Kick, cli *client) {
 }
 
 // logDebug debugs unless in production
-func (server *Server) logDebug(s string) {
-	if server.debugLogger != nil {
-		server.debugLogger.Println(s)
+func (s *Server) logDebug(str string, args ...any) {
+	if s.debugLogger != nil {
+		s.debugLogger.Printf(str, args...)
 	}
 }
 
-func (server *Server) log(s string) {
+func (server *Server) log(str string, args ...any) {
 	if server.logger != nil {
-		server.logger.Println(s)
+		server.logger.Printf(str, args...)
 	}
 }

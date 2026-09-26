@@ -20,19 +20,20 @@ type MediaInitChanMsg struct {
 }
 
 type options struct {
-	uri           string
-	secret        string
-	welcome       *string
-	writer        *io.Writer
-	verbose       bool
-	pubChan       chan PubEvent
-	initChan      chan InitChanMsg
-	mediainitChan chan MediaInitChanMsg
-	initialID     *uint32
-	resolver      func(externalID string, ctx context.Context) *string
-	allocateID    func() uint32
-	cseid         bool //consumer sets external id
-	slowcleanup   *time.Duration
+	uri             string
+	secret          string
+	welcome         *string
+	writer          *io.Writer
+	verbose         bool
+	pubChan         chan PubEvent
+	initChan        chan InitChanMsg
+	mediainitChan   chan MediaInitChanMsg
+	initialID       *uint32
+	resolver        func(externalID string, ctx context.Context) *string
+	allocateID      func() uint32
+	cseid           bool //consumer sets external id
+	slowcleanup     *time.Duration
+	forceExternalId bool
 }
 
 type Option func(option *options) error
@@ -133,6 +134,13 @@ func WithSlowCleanup(d time.Duration) Option {
 			return errors.New("duration must be positive")
 		}
 		option.slowcleanup = &d
+		return nil
+	}
+}
+
+func WithForceExternalId() Option {
+	return func(option *options) error {
+		option.forceExternalId = true
 		return nil
 	}
 }
