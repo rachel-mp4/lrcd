@@ -944,6 +944,64 @@ func (s *Server) handleGet(msg *lrcpb.Event_Get, client *client) {
 		data, _ := proto.Marshal(e)
 		client.dataChan <- data
 	}
+	i := msg.Get.Item
+	if i != nil {
+		id := i.Id
+		s.idmapsMu.Lock()
+		c, ok := s.idToClient[id]
+		s.idmapsMu.Unlock()
+		if !ok {
+			return
+		}
+		c.mu.Lock()
+
+		ok = s.tryGetInit(c)
+		if !ok {
+			s.tryGetMediainit(c)
+		}
+		c.mu.Unlock()
+	}
+}
+
+// call only if holding lock. return false only if there was no init
+func (s *Server) tryGetInit(c *client) bool {
+	init := c.init
+	if init == nil {
+		return false
+	}
+	if init.Id == nil {
+		s.log("error getting init: id was nil")
+		return true
+	}
+	body := c.body()
+	event := lrcpb.Event{Msg: &lrcpb.Event_Get{Get: &lrcpb.Get{Item: &lrcpb.Item{Id: *init.Id, Init: init, Body: &body}}}}
+	data, err := proto.Marshal(&event)
+	if err != nil {
+		s.log("error marshal get init: %s", err.Error())
+		return true
+	}
+	c.dataChan <- data
+	return true
+}
+
+// call only if holding lock. return false only if there was no mediainit
+func (s *Server) tryGetMediainit(c *client) bool {
+	mediainit := c.mediainit
+	if mediainit == nil {
+		return false
+	}
+	if mediainit.Id == nil {
+		s.log("error getting mediainit: id was nil")
+		return true
+	}
+	event := lrcpb.Event{Msg: &lrcpb.Event_Get{Get: &lrcpb.Get{Item: &lrcpb.Item{Id: *mediainit.Id, Mediainit: mediainit}}}}
+	data, err := proto.Marshal(&event)
+	if err != nil {
+		s.log("error marshal get init: %s", err.Error())
+		return true
+	}
+	c.dataChan <- data
+	return true
 }
 
 func (s *Server) handleAttachReply(msg *lrcpb.Event_Attachreply, client *client) {
