@@ -951,20 +951,21 @@ func (s *Server) handleGet(msg *lrcpb.Event_Get, client *client) {
 		c, ok := s.idToClient[id]
 		s.idmapsMu.Unlock()
 		if !ok {
+			s.log("client not ok")
 			return
 		}
 		c.mu.Lock()
 
-		ok = s.tryGetInit(c)
+		ok = s.tryGetInit(c, client.dataChan)
 		if !ok {
-			s.tryGetMediainit(c)
+			s.tryGetMediainit(c, client.dataChan)
 		}
 		c.mu.Unlock()
 	}
 }
 
 // call only if holding lock. return false only if there was no init
-func (s *Server) tryGetInit(c *client) bool {
+func (s *Server) tryGetInit(c *client, dataChan chan<- []byte) bool {
 	init := c.init
 	if init == nil {
 		return false
@@ -980,12 +981,12 @@ func (s *Server) tryGetInit(c *client) bool {
 		s.log("error marshal get init: %s", err.Error())
 		return true
 	}
-	c.dataChan <- data
+	dataChan <- data
 	return true
 }
 
 // call only if holding lock. return false only if there was no mediainit
-func (s *Server) tryGetMediainit(c *client) bool {
+func (s *Server) tryGetMediainit(c *client, dataChan chan<- []byte) bool {
 	mediainit := c.mediainit
 	if mediainit == nil {
 		return false
@@ -1000,7 +1001,7 @@ func (s *Server) tryGetMediainit(c *client) bool {
 		s.log("error marshal get init: %s", err.Error())
 		return true
 	}
-	c.dataChan <- data
+	dataChan <- data
 	return true
 }
 
